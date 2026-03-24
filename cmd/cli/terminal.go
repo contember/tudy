@@ -7,7 +7,6 @@ import (
 	"strings"
 )
 
-// ANSI color codes
 const (
 	colorReset  = "\033[0m"
 	colorRed    = "\033[31m"

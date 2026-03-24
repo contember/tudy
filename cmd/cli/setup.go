@@ -1,21 +1,32 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
+	"net/http"
 	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/contember/tudy/cmd/shared"
 )
 
 // runSetup runs the interactive setup flow
 func runSetup(config *Config) int {
 	printHeader("Tudy Setup")
 
+	// Ensure config directory and default files exist
+	if err := config.EnsureConfigDir(); err != nil {
+		printError(fmt.Sprintf("Failed to initialize config: %v", err))
+		return 1
+	}
+
 	// Step 1: Configure API Key
-	printStep(1, 3, "Configure API Key")
+	printStep(1, 4, "Configure API Key")
 
 	currentKey := config.GetAPIKey()
 	if currentKey != "" {
-		masked := currentKey[:4] + "..." + currentKey[len(currentKey)-4:]
-		printDim(fmt.Sprintf("  Current key: %s", masked))
+		printDim(fmt.Sprintf("  Current key: %s", shared.MaskAPIKey(currentKey)))
 		if !promptYesNo("Update API key?", false) {
 			printOK("API key unchanged")
 		} else {
@@ -30,44 +41,16 @@ func runSetup(config *Config) int {
 	}
 	fmt.Println()
 
-	// Step 2: Trust HTTPS Certificate
-	printStep(2, 3, "Trust HTTPS Certificate")
-
-	if isCertAlreadyTrusted() {
-		printOK("Certificate already trusted")
-	} else {
-		// Need to start proxy first to generate certificate if not running
-		status := CheckProxyStatus(config)
-		if status != StatusRunning {
-			printDim("  Starting proxy to generate certificate...")
-			if err := StartProxy(config); err != nil {
-				printWarning(fmt.Sprintf("Could not start proxy: %v", err))
-				printWarning("You can trust the certificate later with: tudy trust")
-			} else {
-				printDim("  Trusting certificate...")
-				if err := TrustCertificate(config); err != nil {
-					printWarning(fmt.Sprintf("Certificate trust: %v", err))
-				} else {
-					printOK("Certificate trusted")
-				}
-			}
-		} else {
-			printDim("  Trusting certificate...")
-			if err := TrustCertificate(config); err != nil {
-				printWarning(fmt.Sprintf("Certificate trust: %v", err))
-			} else {
-				printOK("Certificate trusted")
-			}
-		}
-	}
+	// Step 2: Docker Networking (macOS only)
+	printStep(2, 4, "Docker Networking")
+	setupDockerNetworking()
 	fmt.Println()
 
 	// Step 3: Start Proxy
-	printStep(3, 3, "Start Proxy")
+	printStep(3, 4, "Start Proxy")
 
 	status := CheckProxyStatus(config)
 	if status == StatusRunning {
-		// Restart to pick up new config
 		printDim("  Restarting proxy...")
 		if err := RestartProxy(config); err != nil {
 			printError(fmt.Sprintf("Failed to restart proxy: %v", err))
@@ -81,6 +64,26 @@ func runSetup(config *Config) int {
 			return 1
 		}
 		printOK("Proxy started")
+	}
+	fmt.Println()
+
+	// Step 4: Trust HTTPS Certificate
+	printStep(4, 4, "Trust HTTPS Certificate")
+
+	if isCertTrustedCheck() {
+		printOK("Certificate already trusted")
+	} else {
+		// Trigger an HTTPS request to generate the certificate
+		printDim("  Generating certificate...")
+		triggerCertGeneration(config)
+
+		printDim("  Trusting certificate...")
+		if err := TrustCertificate(config); err != nil {
+			printWarning(fmt.Sprintf("Certificate trust: %v", err))
+			printDim("  You can trust it later with: tudy trust")
+		} else {
+			printOK("Certificate trusted")
+		}
 	}
 
 	// Print summary
@@ -113,41 +116,22 @@ func configureAPIKey(config *Config) bool {
 	return true
 }
 
-// isCertAlreadyTrusted checks if the certificate is already trusted
-// This is a platform-specific check
-func isCertAlreadyTrusted() bool {
-	// On non-darwin, isCertTrusted is not available, so we check if the function exists
-	// via the build-tagged trust files. For simplicity, we just call the platform function.
-	return isCertTrustedCheck()
-}
-
-// printStatus prints the current proxy status
-func printStatus(config *Config) {
-	status := CheckProxyStatus(config)
-
-	switch status {
-	case StatusRunning:
-		fmt.Printf("%s●%s Proxy is running\n", colorGreen, colorReset)
-	case StatusStarting:
-		fmt.Printf("%s●%s Proxy is starting...\n", colorYellow, colorReset)
-	default:
-		fmt.Printf("%s●%s Proxy is stopped\n", colorRed, colorReset)
+// triggerCertGeneration makes an HTTPS request to force Caddy to generate the local CA cert
+func triggerCertGeneration(config *Config) {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
 	}
-
-	fmt.Printf("  Dashboard: %s\n", config.DashboardURL)
-	fmt.Printf("  Config:    %s\n", config.ConfigDir)
-
-	if config.HasAPIKey() {
-		key := config.GetAPIKey()
-		masked := key[:4] + "..." + key[len(key)-4:]
-		fmt.Printf("  API Key:   %s\n", masked)
-	} else {
-		fmt.Printf("  API Key:   %s(not configured)%s\n", colorRed, colorReset)
-	}
-
-	// Show log file location
-	logFile := getLogFile()
-	if _, err := os.Stat(logFile); err == nil {
-		fmt.Printf("  Logs:      %s\n", logFile)
+	// Request any .localhost domain to trigger on-demand TLS cert generation
+	client.Get("https://proxy.localhost/")
+	// Poll for cert file to appear (Caddy writes it asynchronously)
+	certPath := filepath.Join(config.DataDir(), "pki", "authorities", "local", "root.crt")
+	for i := 0; i < 20; i++ {
+		time.Sleep(200 * time.Millisecond)
+		if _, err := os.Stat(certPath); err == nil {
+			return
+		}
 	}
 }
