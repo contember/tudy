@@ -3,8 +3,6 @@ set -e
 
 REPO="contember/tudy"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-CONFIG_DIR="${CONFIG_DIR:-/usr/local/etc/tudy}"
-DATA_DIR="${DATA_DIR:-/var/lib/tudy}"
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -34,51 +32,37 @@ fi
 echo "Installing tudy v${VERSION} for ${OS}/${ARCH}..."
 
 # Download and extract
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/caddy-${OS}-${ARCH}.tar.gz"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/tudy-${OS}-${ARCH}.tar.gz"
 TMP_DIR=$(mktemp -d)
 trap "rm -rf $TMP_DIR" EXIT
 
 echo "Downloading from ${DOWNLOAD_URL}..."
 curl -sL "$DOWNLOAD_URL" | tar xz -C "$TMP_DIR"
 
-# Install binary
+# Install binaries
 SUDO=""
 if [ ! -w "$INSTALL_DIR" ]; then
   SUDO="sudo"
   echo "Installing to $INSTALL_DIR (requires sudo)..."
 fi
 
-$SUDO mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$DATA_DIR"
-$SUDO mv "$TMP_DIR/caddy" "$INSTALL_DIR/tudy"
-$SUDO chmod +x "$INSTALL_DIR/tudy"
+$SUDO mkdir -p "$INSTALL_DIR"
 
-# Install Caddyfile if not exists
-if [ ! -f "$CONFIG_DIR/Caddyfile" ] && [ -f "$TMP_DIR/Caddyfile" ]; then
-  $SUDO mv "$TMP_DIR/Caddyfile" "$CONFIG_DIR/Caddyfile"
-fi
-
-# Create env file template if not exists
-if [ ! -f "$CONFIG_DIR/env" ]; then
-  $SUDO tee "$CONFIG_DIR/env" > /dev/null << EOF
-# Add your API key here:
-# LLM_API_KEY=sk-your-key-here
-
-CADDY_DATA_DIR=$DATA_DIR
-EOF
-fi
+# CLI binary → tudy, Caddy binary → tudy-bin
+$SUDO mv "$TMP_DIR/cli" "$INSTALL_DIR/tudy"
+$SUDO mv "$TMP_DIR/caddy" "$INSTALL_DIR/tudy-bin"
+$SUDO chmod +x "$INSTALL_DIR/tudy" "$INSTALL_DIR/tudy-bin"
 
 # macOS: remove quarantine and sign
 if [ "$OS" = "darwin" ]; then
-  xattr -d com.apple.quarantine "$INSTALL_DIR/tudy" 2>/dev/null || true
-  codesign --force --deep --sign - "$INSTALL_DIR/tudy" 2>/dev/null || true
+  $SUDO xattr -d com.apple.quarantine "$INSTALL_DIR/tudy" 2>/dev/null || true
+  $SUDO xattr -d com.apple.quarantine "$INSTALL_DIR/tudy-bin" 2>/dev/null || true
+  $SUDO codesign --force --deep --sign - "$INSTALL_DIR/tudy" 2>/dev/null || true
+  $SUDO codesign --force --deep --sign - "$INSTALL_DIR/tudy-bin" 2>/dev/null || true
 fi
 
-cat << EOF
-
-Installed to $INSTALL_DIR/tudy
-Config: $CONFIG_DIR/Caddyfile
-
-Add your API key and start:
-  echo 'LLM_API_KEY=sk-your-key' >> $CONFIG_DIR/env
-  sudo bash -c 'set -a; source $CONFIG_DIR/env; tudy run --config $CONFIG_DIR/Caddyfile'
-EOF
+echo ""
+echo "Installed tudy v${VERSION} to $INSTALL_DIR"
+echo ""
+echo "Run the setup wizard:"
+echo "  tudy setup"
