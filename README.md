@@ -9,31 +9,29 @@ Supports any OpenAI-compatible API (OpenRouter, Ollama, LM Studio, vLLM, etc.).
 - **Dynamic hostname resolution** using any OpenAI-compatible LLM API
 - **Automatic service discovery**:
   - Local processes with open ports (Linux: `ss`/`/proc`, macOS: `lsof`)
-  - Docker containers (via Docker API)
+  - Docker containers (via Docker API), including listening port detection
+- **Direct Docker container access** on macOS via [docker-mac-net-connect](https://github.com/chipmk/docker-mac-net-connect) -- no published ports needed
 - **Cross-platform**: Works on Linux and macOS
 - **On-demand TLS certificates** for `*.localhost` domains
 - **Persistent mapping cache** (JSON file)
 - **Debug dashboard** at `proxy.localhost`
 - **Inter-service proxy** for service-to-service communication (`/_proxy/serviceName/path`)
 - **REST API** for managing mappings (`/_api/mappings/`)
-- **CLI** with `setup`, `status`, `start`, `stop`, `restart`, `trust` commands
-- **macOS menu bar app** for quick access
+- **CLI** with `setup`, `status`, `start`, `stop`, `restart`, `trust`, `update`, `uninstall` commands
+- **Self-update** via `tudy update`
 
 ## Installation
 
-### macOS (Homebrew)
+### Quick Install (macOS/Linux)
 
 ```bash
-brew tap contember/tudy https://github.com/contember/tudy
-brew install tudy
+curl -fsSL https://raw.githubusercontent.com/contember/tudy/main/install.sh | bash
 tudy setup
 ```
 
-The `setup` command walks you through configuring your API key, trusting the HTTPS certificate, and starting the proxy.
+The `setup` command walks you through configuring your API key, Docker networking, trusting the HTTPS certificate, and starting the proxy.
 
 You'll need an [OpenRouter](https://openrouter.ai/) API key (or any OpenAI-compatible API).
-
-> **Note:** On macOS, Docker cannot discover local processes outside the container. Native installation is required for full process discovery.
 
 ### Linux (Docker)
 
@@ -50,17 +48,9 @@ curl -k https://myapp.localhost
 
 To use Tudy from a browser without `ERR_CERT_AUTHORITY_INVALID`, trust Caddy's local root CA — see [Trusting the certificate (Linux)](#trusting-the-certificate-linux) below.
 
+> **Note:** On macOS, Docker cannot discover local processes outside the container. Native installation is required for full process discovery.
+
 ### Alternative Installation
-
-<details>
-<summary>Install script (macOS/Linux)</summary>
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/contember/tudy/main/install.sh | bash
-```
-
-Handles macOS Gatekeeper automatically.
-</details>
 
 <details>
 <summary>Manual download</summary>
@@ -68,8 +58,10 @@ Handles macOS Gatekeeper automatically.
 Download from [Releases](../../releases), then:
 
 ```bash
-tar xzf caddy-darwin-arm64.tar.gz
-sudo LLM_API_KEY=your-key ./caddy run --config Caddyfile
+tar xzf tudy-darwin-arm64.tar.gz
+sudo cp cli /usr/local/bin/tudy
+sudo cp caddy /usr/local/bin/tudy-bin
+tudy setup
 ```
 </details>
 
@@ -77,19 +69,24 @@ sudo LLM_API_KEY=your-key ./caddy run --config Caddyfile
 <summary>Build from source</summary>
 
 ```bash
+# Build the Caddy binary with the plugin
 go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 xcaddy build --with github.com/contember/tudy/llm_resolver=./llm_resolver
-LLM_API_KEY=your-key ./caddy run --config Caddyfile
+
+# Build the CLI
+cd cmd/cli && go build -o tudy .
 ```
 </details>
 
 <details>
 <summary>Using a local LLM (Ollama, etc.)</summary>
 
+Set these in your env file (`/usr/local/etc/tudy/env`) or export them:
+
 ```bash
-export LLM_API_KEY=your-key
-export LLM_API_URL=http://localhost:11434/v1/chat/completions
-export MODEL=llama3.2
+LLM_API_KEY=your-key
+LLM_API_URL=http://localhost:11434/v1/chat/completions
+MODEL=llama3.2
 ```
 </details>
 
@@ -144,38 +141,42 @@ Visit `https://proxy.localhost` to see all current route mappings, discovered pr
 
 ```bash
 # Set a manual mapping
-curl -X PUT https://any.localhost/_api/mappings/myapp.localhost \
+curl -sk -X PUT https://proxy.localhost/_api/mappings/myapp.localhost \
+  -H 'Content-Type: application/json' \
   -d '{"type":"process","target":"localhost","port":3000}'
 
 # Delete a mapping
-curl -X DELETE https://any.localhost/_api/mappings/myapp.localhost
+curl -sk -X DELETE https://proxy.localhost/_api/mappings/myapp.localhost
 ```
 
 ## CLI
 
-The `tudy` command handles proxy management and delegates all other commands to the underlying Caddy binary.
-
 ```
-tudy setup       # Interactive first-time setup
-tudy status      # Show proxy status
+tudy setup       # Interactive first-time setup (API key, Docker, TLS, start)
+tudy status      # Show proxy status with service discovery
 tudy start       # Start the proxy
 tudy stop        # Stop the proxy
 tudy restart     # Restart the proxy
 tudy trust       # Trust the HTTPS certificate
+tudy update      # Update tudy to the latest version
+tudy uninstall   # Fully remove tudy from the system
+tudy logs        # Tail the proxy log file
+tudy version     # Show tudy version
 ```
 
-All other commands (`run`, `version`, `list-modules`, etc.) are passed through to Caddy:
+All other commands are passed through to the underlying Caddy binary:
 
 ```bash
-tudy version     # Shows Caddy version
 tudy run         # Runs Caddy in foreground (env file sourced automatically)
+tudy list-modules
 ```
 
-## macOS Menu Bar App
+## Docker Networking (macOS)
 
-On macOS, a menu bar app is installed alongside the proxy. It shows proxy status, lets you start/stop the service, configure your API key, and trust the certificate from the menu bar.
+On macOS, Docker containers run inside a VM so their IPs aren't directly reachable. Tudy supports two modes:
 
-The app is installed at `$(brew --prefix)/opt/tudy/Tudy.app`. Add it to System Settings > General > Login Items to start automatically.
+- **With [`docker-mac-net-connect`](https://github.com/chipmk/docker-mac-net-connect)** (recommended): Containers are reachable by IP without publishing ports.
+- **Without**: Containers need published ports (`-p 8080:8080`). Tudy uses published port mappings to route traffic.
 
 ## Configuration
 
@@ -190,38 +191,22 @@ The app is installed at `$(brew --prefix)/opt/tudy/Tudy.app`. Add it to System S
 
 ### Config Files
 
-Homebrew installations store config in `$(brew --prefix)/etc/tudy/`:
+Config is stored in `/usr/local/etc/tudy/` (created by `tudy setup`):
 
 | File | Purpose |
 |---|---|
 | `env` | Environment variables (`LLM_API_KEY`, etc.) |
-| `Caddyfile` | Caddy configuration |
-
-### Caddyfile Directives
-
-```caddyfile
-llm_resolver {
-    api_key {env.LLM_API_KEY}
-    api_url {env.LLM_API_URL}
-    model anthropic/claude-haiku-4.5
-    cache_file /data/mappings.json
-    compose_project myproject
-}
-```
+| `Caddyfile` | Caddy configuration (auto-generated) |
 
 ### Service Management
 
 ```bash
-# Via brew services (recommended)
-sudo brew services start tudy
-sudo brew services stop tudy
-
-# Or via the CLI
-tudy start
-tudy stop
+tudy start    # Start the proxy
+tudy stop     # Stop via admin API (no sudo needed)
+tudy restart  # Hot reload if possible, full restart otherwise
 ```
 
-Logs: `~/Library/Logs/Homebrew/tudy.log` (macOS)
+Logs: `~/Library/Logs/tudy.log` (macOS)
 
 ## Trusting the certificate (Linux)
 
@@ -260,7 +245,7 @@ The root CA is persisted in the `caddy_data` volume, so it survives container re
 2. Module checks the mapping cache
 3. If not cached, it:
    - Discovers local processes with open ports
-   - Discovers running Docker containers
+   - Discovers running Docker containers (including listening ports via `/proc/net/tcp`)
    - Calls the LLM with hostname + service list
    - LLM returns the best matching target
    - Result is cached
@@ -278,11 +263,8 @@ xcaddy build --with github.com/contember/tudy/llm_resolver=./llm_resolver
 # Build the CLI
 cd cmd/cli && go build -o tudy .
 
-# Build the menubar app (macOS only)
-cd cmd/menubar && go build -o menubar .
-
 # Run tests
-go test ./...
+cd llm_resolver && go test ./...
 
 # Build Docker image
 docker build -t tudy .
@@ -296,12 +278,12 @@ llm_resolver/            # Caddy module (Go package)
   handler.go             # HTTP middleware, dashboard, API
   resolver.go            # LLM resolution logic
   cache.go               # Persistent mapping storage
+  network_tunnel_darwin.go  # docker-mac-net-connect detection
   discovery/             # Service discovery
     docker.go            # Docker container discovery
     processes.go         # Local process discovery
+cmd/shared/              # Shared utilities
 cmd/cli/                 # CLI binary (tudy command)
-cmd/menubar/             # macOS menu bar app
-Formula/                 # Homebrew formula
 ```
 
 ## License
