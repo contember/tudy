@@ -221,7 +221,7 @@ func printDockerTunnelStatus(data *statusData) {
 	} else {
 		fmt.Printf("  %s●%s Docker networking %svia published ports only%s\n",
 			colorYellow, colorReset, colorDim, colorReset)
-		printDim("    Install docker-mac-net-connect for direct container access without -p")
+		printDim("    Install: brew install chipmk/tap/docker-mac-net-connect")
 	}
 }
 

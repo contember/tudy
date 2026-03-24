@@ -178,6 +178,15 @@ On macOS, Docker containers run inside a VM so their IPs aren't directly reachab
 - **With [`docker-mac-net-connect`](https://github.com/chipmk/docker-mac-net-connect)** (recommended): Containers are reachable by IP without publishing ports.
 - **Without**: Containers need published ports (`-p 8080:8080`). Tudy uses published port mappings to route traffic.
 
+Install it with:
+
+```bash
+brew install chipmk/tap/docker-mac-net-connect
+sudo brew services start chipmk/tap/docker-mac-net-connect
+```
+
+Or run `tudy setup` which offers to install it automatically.
+
 ## Configuration
 
 ### Environment Variables
