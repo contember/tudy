@@ -2,33 +2,70 @@
 
 package llm_resolver
 
-import "go.uber.org/zap"
+import (
+	"os/exec"
+	"strings"
 
-// NetworkTunnel is disabled on macOS for now.
-// The WireGuard tunnel to Docker VM requires a setup container that is not
-// publicly available. Instead, we rely on published port detection which
-// works well for most use cases.
-//
-// To access Docker container IPs directly on macOS, consider using:
-// - docker-mac-net-connect: https://github.com/chipmk/docker-mac-net-connect
-// - Or publish ports with -p flag when running containers
-type NetworkTunnel struct{}
+	"go.uber.org/zap"
+)
 
-// NewNetworkTunnel creates a no-op tunnel on macOS
-func NewNetworkTunnel(logger *zap.Logger) *NetworkTunnel {
-	logger.Debug("network tunnel disabled on macOS, using published port detection")
-	return &NetworkTunnel{}
+// NetworkTunnel detects docker-mac-net-connect on macOS.
+// When running, Docker container IPs are directly reachable
+// from the host, so published ports are not required.
+// See: https://github.com/chipmk/docker-mac-net-connect
+type NetworkTunnel struct {
+	logger  *zap.Logger
+	running bool
 }
 
-// Start is a no-op - published port detection is used instead
+// NewNetworkTunnel checks for docker-mac-net-connect on macOS
+func NewNetworkTunnel(logger *zap.Logger) *NetworkTunnel {
+	return &NetworkTunnel{logger: logger}
+}
+
+// Start checks if docker-mac-net-connect is running
 func (nt *NetworkTunnel) Start() error {
+	nt.running = detectDockerMacNetConnect()
+	if nt.running {
+		nt.logger.Info("docker-mac-net-connect detected, container IPs are directly reachable")
+	} else {
+		nt.logger.Debug("docker-mac-net-connect not detected, using published port detection")
+	}
 	return nil
 }
 
-// Stop is a no-op
+// Stop is a no-op — we don't own the tunnel process
 func (nt *NetworkTunnel) Stop() {}
 
-// IsRunning always returns false
+// IsRunning returns true if docker-mac-net-connect is active
 func (nt *NetworkTunnel) IsRunning() bool {
+	return nt.running
+}
+
+// detectDockerMacNetConnect checks if docker-mac-net-connect is running
+// by looking for its process and verifying Docker subnet routes exist.
+func detectDockerMacNetConnect() bool {
+	// Check for the process
+	out, err := exec.Command("pgrep", "-f", "docker-mac-net-connect").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		return false
+	}
+
+	// Verify Docker subnet routes through utun interface exist
+	out, err = exec.Command("netstat", "-rnf", "inet").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		// Look for Docker subnet routes through a utun interface.
+		// Docker can use any private range: 172.x, 192.168.x, or 10.x
+		if !strings.Contains(line, "utun") {
+			continue
+		}
+		if strings.HasPrefix(line, "172.") || strings.HasPrefix(line, "192.168.") || strings.HasPrefix(line, "10.") {
+			return true
+		}
+	}
+
 	return false
 }

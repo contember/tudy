@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
-	"strings"
+"strings"
 	"time"
 )
 
@@ -146,7 +146,7 @@ func getContainerDetails(containerID string) (*DockerContainer, error) {
 		}
 	}
 
-	// Extract exposed ports
+	// Extract exposed ports from Dockerfile EXPOSE
 	var ports []int
 	for portSpec := range data.Config.ExposedPorts {
 		if match := portRegex.FindStringSubmatch(portSpec); len(match) > 1 {
