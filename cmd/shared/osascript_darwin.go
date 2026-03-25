@@ -16,10 +16,10 @@ func CopyFileWithAdmin(src, dst string) error {
 			return nil
 		}
 	}
-	// Fall back to admin copy via osascript
+	// Fall back to admin copy via osascript (chmod so the calling user can read the result)
 	cmd := exec.Command("osascript",
 		"-e", `on run argv`,
-		"-e", `do shell script "cp " & quoted form of item 1 of argv & " " & quoted form of item 2 of argv with administrator privileges`,
+		"-e", `do shell script "cp " & quoted form of item 1 of argv & " " & quoted form of item 2 of argv & " && chmod 644 " & quoted form of item 2 of argv with administrator privileges`,
 		"-e", `end run`,
 		"--", src, dst)
 	if output, err := cmd.CombinedOutput(); err != nil {
