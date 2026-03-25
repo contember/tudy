@@ -47,6 +47,18 @@ func runUpdate() {
 		printError(fmt.Sprintf("Update failed: %v", err))
 		os.Exit(1)
 	}
+
+	// Restart daemon if it was running
+	if isDaemonLoaded() {
+		fmt.Print("Restarting proxy with new version... ")
+		config, err := LoadConfig()
+		if err == nil {
+			// Regenerate plist in case binary path changed
+			installDaemon(config)
+			RestartProxy(config)
+		}
+		fmt.Println("done")
+	}
 }
 
 // getLatestVersion fetches the latest release version from GitHub

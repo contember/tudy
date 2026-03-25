@@ -22,7 +22,7 @@ func runSetup(config *Config) int {
 	}
 
 	// Step 1: Configure API Key
-	printStep(1, 4, "Configure API Key")
+	printStep(1, 5, "Configure API Key")
 
 	currentKey := config.GetAPIKey()
 	if currentKey != "" {
@@ -42,12 +42,27 @@ func runSetup(config *Config) int {
 	fmt.Println()
 
 	// Step 2: Docker Networking (macOS only)
-	printStep(2, 4, "Docker Networking")
+	printStep(2, 5, "Docker Networking")
 	setupDockerNetworking()
 	fmt.Println()
 
-	// Step 3: Start Proxy
-	printStep(3, 4, "Start Proxy")
+	// Step 3: Install System Service (one-time password prompt)
+	printStep(3, 5, "Install System Service")
+	if !isDaemonInstalled() {
+		printDim("  Installing launchd service (one-time admin password)...")
+		if err := installDaemon(config); err != nil {
+			printWarning(fmt.Sprintf("Failed to install service: %v", err))
+			printDim("  Falling back to direct start (will ask for password each time)")
+		} else {
+			printOK("System service installed (no password needed for start/stop)")
+		}
+	} else {
+		printOK("System service already installed")
+	}
+	fmt.Println()
+
+	// Step 4: Start Proxy
+	printStep(4, 5, "Start Proxy")
 
 	status := CheckProxyStatus(config)
 	if status == StatusRunning {
@@ -67,8 +82,8 @@ func runSetup(config *Config) int {
 	}
 	fmt.Println()
 
-	// Step 4: Trust HTTPS Certificate
-	printStep(4, 4, "Trust HTTPS Certificate")
+	// Step 5: Trust HTTPS Certificate
+	printStep(5, 5, "Trust HTTPS Certificate")
 
 	if isCertTrustedCheck() {
 		printOK("Certificate already trusted")

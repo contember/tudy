@@ -64,6 +64,17 @@ func isProcessRunning() bool {
 }
 
 func StartProxy(config *Config) error {
+	if isDaemonInstalled() {
+		if err := loadDaemon(); err != nil {
+			return err
+		}
+		return waitForStart()
+	}
+	return startDirect(config)
+}
+
+// startDirect starts the proxy via osascript (fallback when launchd daemon is not installed)
+func startDirect(config *Config) error {
 	home, _ := os.UserHomeDir()
 	logDir := filepath.Join(home, "Library", "Logs")
 	os.MkdirAll(logDir, 0755)
@@ -101,6 +112,11 @@ func waitForStart() error {
 }
 
 func StopProxy(config *Config) error {
+	// Unload daemon first to prevent launchd from restarting the process
+	if isDaemonLoaded() {
+		unloadDaemon()
+	}
+
 	if isAdminAPIResponding() {
 		client := &http.Client{
 			Timeout: 10 * time.Second,
@@ -205,6 +221,11 @@ func escapeAppleScript(s string) string {
 }
 
 func getLogFile() string {
+	if isDaemonInstalled() {
+		if _, err := os.Stat("/var/log/tudy.log"); err == nil {
+			return "/var/log/tudy.log"
+		}
+	}
 	home, _ := os.UserHomeDir()
 	locations := []string{
 		filepath.Join(home, "Library", "Logs", "tudy.log"),
@@ -214,6 +235,9 @@ func getLogFile() string {
 		if _, err := os.Stat(loc); err == nil {
 			return loc
 		}
+	}
+	if isDaemonInstalled() {
+		return "/var/log/tudy.log"
 	}
 	return filepath.Join(home, "Library", "Logs", "tudy.log")
 }

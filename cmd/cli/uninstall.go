@@ -12,6 +12,7 @@ func runUninstall() {
 
 	fmt.Println("This will remove:")
 	fmt.Println("  - Tudy binaries (tudy, tudy-bin)")
+	fmt.Println("  - System service (launchd daemon)")
 	fmt.Println("  - Configuration files (Caddyfile, env)")
 	fmt.Println("  - TLS certificates and Caddy data")
 	fmt.Println("  - Log files")
@@ -35,7 +36,14 @@ func runUninstall() {
 	}
 	fmt.Println("done")
 
-	// Step 2: Remove certificates from Keychain
+	// Step 2: Remove system service
+	if isDaemonInstalled() {
+		fmt.Print("Removing system service... ")
+		uninstallDaemon()
+		fmt.Println("done")
+	}
+
+	// Step 3: Remove certificates from Keychain
 	uninstallCertificates()
 
 	// Step 3: Remove binaries
