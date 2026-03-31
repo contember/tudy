@@ -28,6 +28,9 @@ vendor/
 /data/
 *.json.tmp
 
+# Docker Compose override
+docker-compose.override.yml
+
 # Build artifacts
 /build/
 cmd/menubar/menubar
