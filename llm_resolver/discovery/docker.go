@@ -66,6 +66,8 @@ type dockerInspectOutput struct {
 
 // DiscoverDockerContainers discovers running Docker containers
 func DiscoverDockerContainers(ownComposeProject string) ([]DockerContainer, error) {
+	ensureDockerHost()
+
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
@@ -212,6 +214,7 @@ func getContainerDetails(containerID string) (*DockerContainer, error) {
 
 // GetContainerIP gets the IP address of a container by name or ID
 func GetContainerIP(containerIDOrName string) (string, error) {
+	ensureDockerHost()
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
