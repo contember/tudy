@@ -51,6 +51,12 @@ func delegateToCaddy(config *Config, args []string) error {
 		os.Setenv("CADDY_DATA_DIR", config.DataDir())
 	}
 
+	// Ensure DOCKER_HOST is set so the docker CLI can find the socket.
+	// On macOS, Docker Desktop uses a context-based socket path
+	// (e.g. ~/.docker/run/docker.sock) which is not available when
+	// running as a launchd daemon under root.
+	ensureDockerHost()
+
 	// Build argv: binary path + remaining args
 	argv := append([]string{config.BinaryPath}, args...)
 

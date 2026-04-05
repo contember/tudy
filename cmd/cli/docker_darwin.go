@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -11,6 +12,43 @@ import (
 func isDockerMacNetConnectRunning() bool {
 	out, err := exec.Command("pgrep", "-f", "docker-mac-net-connect").Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
+// ensureDockerHost sets DOCKER_HOST if not already set.
+// On macOS, Docker Desktop places the socket in the user's home directory
+// rather than /var/run/docker.sock. When running as a launchd daemon (root),
+// the Docker CLI context is unavailable, so we probe known socket paths.
+func ensureDockerHost() {
+	if os.Getenv("DOCKER_HOST") != "" {
+		return
+	}
+
+	// Try docker context inspect first (works when running as the user)
+	if out, err := exec.Command("docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output(); err == nil {
+		if host := strings.TrimSpace(string(out)); host != "" {
+			os.Setenv("DOCKER_HOST", host)
+			return
+		}
+	}
+
+	// Probe known Docker Desktop socket paths on macOS
+	knownSockets := []string{
+		os.ExpandEnv("$HOME/.docker/run/docker.sock"),
+	}
+	// When running as root, $HOME is /var/root — also check real user homes
+	if entries, err := os.ReadDir("/Users"); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				knownSockets = append(knownSockets, "/Users/"+e.Name()+"/.docker/run/docker.sock")
+			}
+		}
+	}
+	for _, sock := range knownSockets {
+		if fi, err := os.Stat(sock); err == nil && fi.Mode().Type() == os.ModeSocket {
+			os.Setenv("DOCKER_HOST", "unix://"+sock)
+			return
+		}
+	}
 }
 
 func setupDockerNetworking() {
