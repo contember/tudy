@@ -42,11 +42,13 @@ export LLM_API_KEY=your-key
 docker compose up -d
 ```
 
-Then test with:
+Quick smoke test (skips cert validation):
 
 ```bash
 curl -k https://myapp.localhost
 ```
+
+To use Tudy from a browser without `ERR_CERT_AUTHORITY_INVALID`, trust Caddy's local root CA — see [Trusting the certificate (Linux)](#trusting-the-certificate-linux) below.
 
 ### Alternative Installation
 
@@ -220,6 +222,37 @@ tudy stop
 ```
 
 Logs: `~/Library/Logs/Homebrew/tudy.log` (macOS)
+
+## Trusting the certificate (Linux)
+
+Tudy uses Caddy's internal CA to issue short-lived certs for `*.localhost`. Browsers don't trust this CA by default. To get rid of `ERR_CERT_AUTHORITY_INVALID`, add the root CA to your trust stores.
+
+Extract the root CA from the running container:
+
+```bash
+docker compose cp tudy:/data/pki/authorities/local/root.crt /tmp/tudy-root-ca.crt
+```
+
+Install it system-wide (curl, most CLI tools, Chrome/Edge via system bundle):
+
+```bash
+sudo cp /tmp/tudy-root-ca.crt /usr/local/share/ca-certificates/tudy-root-ca.crt
+sudo update-ca-certificates
+```
+
+Add it to the NSS database (Chrome/Chromium on Linux read this in addition to / instead of the system bundle):
+
+```bash
+certutil -d sql:$HOME/.pki/nssdb -A -t "CT,C,C" -n "Tudy Root CA" -i /tmp/tudy-root-ca.crt
+```
+
+(Install `libnss3-tools` on Debian/Ubuntu if `certutil` is missing.)
+
+Firefox uses its own trust store — import `/tmp/tudy-root-ca.crt` via *Settings → Privacy & Security → Certificates → View Certificates → Authorities → Import* and check "Trust this CA to identify websites".
+
+Fully restart your browser after importing (closing the window is not enough — kill all processes).
+
+The root CA is persisted in the `caddy_data` volume, so it survives container restarts and rebuilds. You only need to do this once.
 
 ## How It Works
 
