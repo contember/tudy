@@ -1,28 +1,28 @@
 class Tudy < Formula
   desc "AI-powered local development proxy"
   homepage "https://github.com/contember/tudy"
-  version "0.4.0"
+  version "0.5.0"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/contember/tudy/releases/download/v#{version}/caddy-darwin-arm64.tar.gz"
-      sha256 "1c609013a70007df8d6dcea4eaa4d3ab8c4062bf65d0ccce418f1bd8da5a7f9b"
+      url "https://github.com/contember/tudy/releases/download/v#{version}/tudy-darwin-arm64.tar.gz"
+      sha256 "c750239fd87f2a6c58f56bbeaefa75f3beb66eaf6f37d962791f9e77fb359bcd"
     end
     on_intel do
-      url "https://github.com/contember/tudy/releases/download/v#{version}/caddy-darwin-amd64.tar.gz"
-      sha256 "e3b66ef535b785b9310a3ea6af49ecf41fc4d9b968e8b75332af21da8a381e6e"
+      url "https://github.com/contember/tudy/releases/download/v#{version}/tudy-darwin-amd64.tar.gz"
+      sha256 "42ab8dbde617f3b24c827500b4fab1d2778f73f7e9fe56dd920350c938667c10"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/contember/tudy/releases/download/v#{version}/caddy-linux-arm64.tar.gz"
-      sha256 "8d4c3192e1ac0371229205960bd43266292d80a0275b68a92ec56b9a2dae3b8d"
+      url "https://github.com/contember/tudy/releases/download/v#{version}/tudy-linux-arm64.tar.gz"
+      sha256 "be7ff3c83569408c3a605ff13f2b5932b317a58f3d8a8b901a5e5123963c06c2"
     end
     on_intel do
-      url "https://github.com/contember/tudy/releases/download/v#{version}/caddy-linux-amd64.tar.gz"
-      sha256 "9c240b1f10d9e0153726a11dab4b44a3bfd979310021872c15d234d833b6f8e5"
+      url "https://github.com/contember/tudy/releases/download/v#{version}/tudy-linux-amd64.tar.gz"
+      sha256 "6313751d73f3d6ffd6036c6f65eddabfbb5db5fa3f1b9736677cacf8dac0f37e"
     end
   end
 
@@ -31,52 +31,6 @@ class Tudy < Formula
     bin.install "cli" => "tudy"
     (etc/"tudy").mkpath
     (etc/"tudy").install "Caddyfile" unless (etc/"tudy/Caddyfile").exist?
-
-    # Install menubar app (macOS only)
-    if File.exist?("menubar") && OS.mac?
-      # Create app bundle
-      app_name = "Tudy.app"
-      app_path = prefix/app_name
-      (app_path/"Contents/MacOS").mkpath
-      (app_path/"Contents/Resources").mkpath
-
-      cp "menubar", app_path/"Contents/MacOS/menubar"
-      chmod 0755, app_path/"Contents/MacOS/menubar"
-
-      # Create Info.plist
-      (app_path/"Contents/Info.plist").write <<~XML
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-          <key>CFBundleExecutable</key>
-          <string>menubar</string>
-          <key>CFBundleIdentifier</key>
-          <string>com.contember.tudy</string>
-          <key>CFBundleName</key>
-          <string>Tudy</string>
-          <key>CFBundleDisplayName</key>
-          <string>Tudy</string>
-          <key>CFBundleVersion</key>
-          <string>#{version}</string>
-          <key>CFBundleShortVersionString</key>
-          <string>#{version}</string>
-          <key>CFBundlePackageType</key>
-          <string>APPL</string>
-          <key>LSUIElement</key>
-          <true/>
-          <key>LSMinimumSystemVersion</key>
-          <string>10.13</string>
-          <key>NSHighResolutionCapable</key>
-          <true/>
-        </dict>
-        </plist>
-      XML
-
-      # Link to Applications via prefix
-      (prefix/"Applications").mkpath
-      ln_sf app_path, prefix/"Applications/#{app_name}"
-    end
   end
 
   service do
@@ -106,7 +60,7 @@ class Tudy < Formula
   end
 
   def caveats
-    s = <<~EOS
+    <<~EOS
       Run the interactive setup to configure API key, trust certificate, and start:
         tudy setup
 
@@ -116,18 +70,6 @@ class Tudy < Formula
 
       Logs: #{var}/log/tudy.log
     EOS
-
-    if OS.mac?
-      s += <<~EOS
-
-        Menu bar app installed at:
-          #{opt_prefix}/Tudy.app
-
-        To add to Login Items, drag the app to System Settings > General > Login Items
-      EOS
-    end
-
-    s
   end
 
   test do
