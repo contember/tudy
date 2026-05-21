@@ -212,7 +212,7 @@ Config is stored in `/usr/local/etc/tudy/` (created by `tudy setup`):
 ```bash
 tudy start    # Start the proxy
 tudy stop     # Stop via admin API (no sudo needed)
-tudy restart  # Hot reload if possible, full restart otherwise
+tudy restart  # Full restart (re-sources env file)
 ```
 
 Logs: `~/Library/Logs/tudy.log` (macOS)

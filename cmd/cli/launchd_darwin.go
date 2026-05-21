@@ -16,6 +16,19 @@ const (
 	sudoersPath = "/etc/sudoers.d/tudy"
 )
 
+// xmlEscape escapes the five XML entities so paths containing
+// &, <, >, ", or ' don't produce a malformed plist.
+func xmlEscape(s string) string {
+	r := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&apos;",
+	)
+	return r.Replace(s)
+}
+
 func generatePlist(config *Config) string {
 	// Find the tudy CLI binary (not tudy-bin) so delegateToCaddy handles env sourcing
 	tudyBin := "/usr/local/bin/tudy"
@@ -46,7 +59,7 @@ func generatePlist(config *Config) string {
 	<string>%s</string>
 </dict>
 </plist>
-`, daemonLabel, tudyBin, config.CaddyFile, config.ConfigDir)
+`, xmlEscape(daemonLabel), xmlEscape(tudyBin), xmlEscape(config.CaddyFile), xmlEscape(config.ConfigDir))
 }
 
 func generateSudoers() string {
