@@ -6,18 +6,23 @@ import (
 	"os/exec"
 )
 
+// Version is set at build time via -ldflags
+var Version = "dev"
+
 const usage = `Tudy - AI-powered local development proxy
 
 Usage:
   tudy <command> [args...]
 
 Commands:
-  setup       Interactive first-time setup (API key, certificate, start)
+  setup       Interactive first-time setup (API key, certificate, Docker, start)
   status      Show proxy status
   start       Start the proxy
   stop        Stop the proxy
   restart     Restart the proxy
   trust       Trust the HTTPS certificate
+  update      Update tudy to the latest version
+  uninstall   Fully remove tudy from the system
   logs        Tail the proxy log file
 
 All other commands (run, version, etc.) are passed through to Caddy.
@@ -36,11 +41,14 @@ func main() {
 		fmt.Print(usage)
 		os.Exit(0)
 
+	case "version", "--version", "-v":
+		fmt.Printf("tudy v%s\n", Version)
+		os.Exit(0)
+
 	case "setup":
 		config, err := LoadConfig()
 		if err != nil {
 			printError(fmt.Sprintf("Failed to load configuration: %v", err))
-			printError("Make sure tudy is installed via Homebrew.")
 			os.Exit(1)
 		}
 		os.Exit(runSetup(config))
@@ -51,7 +59,7 @@ func main() {
 			printError(fmt.Sprintf("Failed to load configuration: %v", err))
 			os.Exit(1)
 		}
-		printStatus(config)
+		printRichStatus(config)
 
 	case "start":
 		config, err := LoadConfig()
@@ -61,7 +69,7 @@ func main() {
 		}
 		status := CheckProxyStatus(config)
 		if status == StatusRunning {
-			fmt.Println("Proxy is already running.")
+			printRichStatus(config, status)
 			os.Exit(0)
 		}
 		fmt.Print("Starting proxy... ")
@@ -71,6 +79,8 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("done")
+		fmt.Println()
+		printRichStatus(config)
 
 	case "stop":
 		config, err := LoadConfig()
@@ -118,6 +128,12 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("done")
+
+	case "update":
+		runUpdate()
+
+	case "uninstall":
+		runUninstall()
 
 	case "logs":
 		logFile := getLogFile()

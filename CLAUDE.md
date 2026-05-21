@@ -36,22 +36,25 @@ llm_resolver/                    # Caddy module (Go package)
     ├── docker.go                # Docker container discovery
     └── processes.go             # Local process discovery
 
+cmd/shared/                      # Shared utilities across binaries
+├── env.go                       # Env file read/write
+├── mask.go                      # API key masking
+├── osascript_darwin.go          # macOS admin privilege helpers
+└── osascript_other.go           # Non-macOS stubs
+
 cmd/cli/                         # CLI binary (tudy command)
 ├── main.go                      # Entry point, subcommand dispatch
 ├── config.go                    # Configuration handling
+├── display.go                   # Rich status output
 ├── proxy.go                     # Proxy status/start/stop/restart
 ├── setup.go                     # Interactive setup flow
+├── update.go                    # Self-update
+├── uninstall.go                 # Full uninstall
 ├── delegate.go                  # Env sourcing + exec to caddy
 ├── terminal.go                  # ANSI colors, prompts
+├── docker_darwin.go             # macOS Docker networking setup
 ├── trust_darwin.go              # macOS certificate trust
 └── trust_other.go               # Linux certificate trust stub
-
-cmd/menubar/                     # macOS menubar app
-├── main.go                      # Entry point
-├── app.go                       # Application logic
-├── config.go                    # Configuration handling
-├── dialog.go                    # UI dialogs
-└── proxy.go                     # Proxy control
 ```
 
 ## Environment Variables

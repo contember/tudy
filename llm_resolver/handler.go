@@ -255,10 +255,16 @@ func (m *LLMResolver) handleDebug(w http.ResponseWriter, r *http.Request) error 
 	}
 
 	// Return JSON
+	processes, _ := m.processCache.Get()
+	containers, _ := DiscoverDockerContainers(m.ComposeProject)
+
 	data := map[string]interface{}{
-		"mappings":   m.cache.GetAll(),
-		"model":      m.Model,
-		"cache_file": m.CacheFile,
+		"mappings":       m.cache.GetAll(),
+		"model":          m.Model,
+		"cache_file":     m.CacheFile,
+		"processes":      processes,
+		"containers":     containers,
+		"docker_tunnel":  m.networkTunnel != nil && m.networkTunnel.IsRunning(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1144,15 +1150,27 @@ func (m *LLMResolver) buildUpstreamURL(mapping *RouteMapping) (string, error) {
 		return fmt.Sprintf("127.0.0.1:%d", port), nil
 	}
 
-	// Docker container - try published port first (required for macOS/Windows)
+	// Docker container — if network tunnel is active, use container IP directly
+	if m.networkTunnel != nil && m.networkTunnel.IsRunning() {
+		ip, err := GetContainerIP(mapping.Target)
+		if err == nil && ip != "" {
+			return fmt.Sprintf("%s:%d", ip, mapping.Port), nil
+		}
+		m.logger.Warn("tunnel active but cannot resolve container IP, trying published port",
+			zap.String("container", mapping.Target),
+			zap.Error(err),
+		)
+	}
+
+	// Try published port (required on macOS/Windows without tunnel)
 	if hostIP, hostPort, found := GetContainerHostAddress(mapping.Target, mapping.Port); found {
 		return fmt.Sprintf("%s:%d", hostIP, hostPort), nil
 	}
 
-	// Fall back to container IP (works when proxy runs inside Docker on same network)
+	// Fall back to container IP (works on Linux or inside Docker on same network)
 	ip, err := GetContainerIP(mapping.Target)
 	if err != nil || ip == "" {
-		return "", fmt.Errorf("cannot resolve IP for container %s: %v", mapping.Target, err)
+		return "", fmt.Errorf("cannot resolve IP for container %s (no published port and container IP not reachable): %v", mapping.Target, err)
 	}
 
 	return fmt.Sprintf("%s:%d", ip, mapping.Port), nil

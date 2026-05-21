@@ -1,44 +1,26 @@
 package main
 
 import (
-	"bufio"
 	"os"
 	"strings"
 	"syscall"
+
+	"github.com/contember/tudy/cmd/shared"
 )
 
-// sourceEnvFile reads the env file and sets environment variables
 func sourceEnvFile(envFile string) {
-	file, err := os.Open(envFile)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-			value = strings.Trim(value, "\"'")
-			os.Setenv(key, value)
-		}
+	for key, value := range shared.ParseEnvFile(envFile) {
+		os.Setenv(key, value)
 	}
 }
 
 // ensurePath adds common binary directories to PATH.
-// This is needed when running as a launchd service (e.g. via brew services)
-// where PATH is minimal (/usr/bin:/bin:/usr/sbin:/sbin) and tools like
-// docker, lsof, etc. may not be found.
+// This is needed when running as a launchd service where PATH is minimal
+// (/usr/bin:/bin:/usr/sbin:/sbin) and tools like docker, lsof, etc. may
+// not be found.
 func ensurePath() {
 	extraPaths := []string{
 		"/usr/local/bin",
-		"/opt/homebrew/bin",
 	}
 	current := os.Getenv("PATH")
 	existing := make(map[string]bool)
@@ -66,17 +48,14 @@ func delegateToCaddy(config *Config, args []string) error {
 
 	// Set CADDY_DATA_DIR if not already set
 	if os.Getenv("CADDY_DATA_DIR") == "" {
-		// Determine var dir based on config dir location
-		var varDir string
-		if strings.HasPrefix(config.ConfigDir, "/opt/homebrew") {
-			varDir = "/opt/homebrew/var/lib/tudy"
-		} else if strings.HasPrefix(config.ConfigDir, "/usr/local") {
-			varDir = "/usr/local/var/lib/tudy"
-		}
-		if varDir != "" {
-			os.Setenv("CADDY_DATA_DIR", varDir)
-		}
+		os.Setenv("CADDY_DATA_DIR", config.DataDir())
 	}
+
+	// Ensure DOCKER_HOST is set so the docker CLI can find the socket.
+	// On macOS, Docker Desktop uses a context-based socket path
+	// (e.g. ~/.docker/run/docker.sock) which is not available when
+	// running as a launchd daemon under root.
+	ensureDockerHost()
 
 	// Build argv: binary path + remaining args
 	argv := append([]string{config.BinaryPath}, args...)

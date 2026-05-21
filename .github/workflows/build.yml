@@ -34,7 +34,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.24'
           cache-dependency-path: llm_resolver/go.sum
 
       - name: Install xcaddy
@@ -49,6 +49,15 @@ jobs:
             --with github.com/contember/tudy/llm_resolver=${{ github.workspace }}/llm_resolver \
             --output caddy
 
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "VERSION=dev" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build CLI
         env:
           GOOS: ${{ matrix.os }}
@@ -56,33 +65,20 @@ jobs:
           CGO_ENABLED: 0
         run: |
           cd cmd/cli
-          go build -ldflags="-s -w" -o ../../cli .
-
-      - name: Build menubar app (macOS only)
-        if: matrix.os == 'darwin'
-        env:
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: 1
-        run: |
-          cd cmd/menubar
-          go build -ldflags="-s -w" -o ../../menubar .
+          go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" -o ../../cli .
 
       - name: Create tarball
         run: |
-          if [ "${{ matrix.os }}" = "darwin" ]; then
-            tar czf caddy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz caddy cli menubar Caddyfile
-          else
-            tar czf caddy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz caddy cli Caddyfile
-          fi
-          shasum -a 256 caddy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz > caddy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256
+          tar czf tudy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz caddy cli
+          shasum -a 256 tudy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz > tudy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: caddy-${{ matrix.os }}-${{ matrix.arch }}
+          name: tudy-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            caddy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
-            caddy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256
+            tudy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+            tudy-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256
 
   docker:
     name: Build Docker image
@@ -122,54 +118,11 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          for dir in artifacts/caddy-*; do
+          for dir in artifacts/tudy-*; do
             cp "$dir"/*.tar.gz "release/" 2>/dev/null || true
             cp "$dir"/*.sha256 "release/" 2>/dev/null || true
           done
           ls -la release/
-
-      - name: Update Homebrew formula
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-
-          # Read SHA256 values
-          SHA_DARWIN_ARM64=$(cat release/caddy-darwin-arm64.tar.gz.sha256 | awk '{print $1}')
-          SHA_DARWIN_AMD64=$(cat release/caddy-darwin-amd64.tar.gz.sha256 | awk '{print $1}')
-          SHA_LINUX_ARM64=$(cat release/caddy-linux-arm64.tar.gz.sha256 | awk '{print $1}')
-          SHA_LINUX_AMD64=$(cat release/caddy-linux-amd64.tar.gz.sha256 | awk '{print $1}')
-
-          # Update formula using awk for precise replacements
-          awk -v ver="$VERSION" \
-              -v sha_darwin_arm64="$SHA_DARWIN_ARM64" \
-              -v sha_darwin_amd64="$SHA_DARWIN_AMD64" \
-              -v sha_linux_arm64="$SHA_LINUX_ARM64" \
-              -v sha_linux_amd64="$SHA_LINUX_AMD64" '
-            /version "/ { gsub(/"[0-9]+\.[0-9]+\.[0-9]+"/, "\"" ver "\"") }
-            /on_macos do/,/end/ {
-              if (/on_arm do/) { in_macos_arm=1 }
-              if (/on_intel do/) { in_macos_arm=0; in_macos_intel=1 }
-              if (in_macos_arm && /sha256 "/) { gsub(/"[a-f0-9]{64}"/, "\"" sha_darwin_arm64 "\"") }
-              if (in_macos_intel && /sha256 "/) { gsub(/"[a-f0-9]{64}"/, "\"" sha_darwin_amd64 "\""); in_macos_intel=0 }
-            }
-            /on_linux do/,/end/ {
-              if (/on_arm do/) { in_linux_arm=1 }
-              if (/on_intel do/) { in_linux_arm=0; in_linux_intel=1 }
-              if (in_linux_arm && /sha256 "/) { gsub(/"[a-f0-9]{64}"/, "\"" sha_linux_arm64 "\"") }
-              if (in_linux_intel && /sha256 "/) { gsub(/"[a-f0-9]{64}"/, "\"" sha_linux_amd64 "\""); in_linux_intel=0 }
-            }
-            { print }
-          ' Formula/tudy.rb > Formula/tudy.rb.tmp
-          mv Formula/tudy.rb.tmp Formula/tudy.rb
-
-          cat Formula/tudy.rb
-
-      - name: Commit formula update
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/tudy.rb
-          git commit -m "chore: update homebrew formula for ${GITHUB_REF#refs/tags/}"
-          git push origin HEAD:main
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

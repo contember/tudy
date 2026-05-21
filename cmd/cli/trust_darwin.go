@@ -3,13 +3,15 @@
 package main
 
 import (
-	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/contember/tudy/cmd/shared"
 )
 
 // TrustCertificate installs Caddy's root CA certificate to the system trust store
@@ -18,9 +20,9 @@ func TrustCertificate(config *Config) error {
 
 	// Try multiple possible certificate locations
 	certPaths := []string{
-		filepath.Join(home, "Library", "Application Support", "Caddy", "pki", "authorities", "local", "root.crt"),
-		"/opt/homebrew/var/lib/tudy/pki/authorities/local/root.crt",
+		filepath.Join(config.DataDir(), "pki", "authorities", "local", "root.crt"),
 		"/usr/local/var/lib/tudy/pki/authorities/local/root.crt",
+		filepath.Join(home, "Library", "Application Support", "Caddy", "pki", "authorities", "local", "root.crt"),
 		"/var/lib/tudy/pki/authorities/local/root.crt",
 	}
 
@@ -30,22 +32,7 @@ func TrustCertificate(config *Config) error {
 	// Try to copy certificate from each path (may need admin privileges for root-owned files)
 	var copyErr error
 	for _, certPath := range certPaths {
-		// First try without admin privileges
-		if err := copyFile(certPath, tempCert); err == nil {
-			copyErr = nil
-			break
-		}
-
-		// Try with admin privileges (handles permission denied on root-owned directories)
-		copyScript := fmt.Sprintf(
-			`do shell script "test -f %q && cp %q %q && chmod 644 %q" with administrator privileges`,
-			certPath, certPath, tempCert, tempCert,
-		)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		cmd := exec.CommandContext(ctx, "osascript", "-e", copyScript)
-		_, err := cmd.CombinedOutput()
-		cancel()
-		if err == nil {
+		if err := shared.CopyFileWithAdmin(certPath, tempCert); err == nil {
 			copyErr = nil
 			break
 		}
@@ -66,8 +53,7 @@ func TrustCertificate(config *Config) error {
 		}
 	}
 
-	// Check if certificate is already trusted
-	if isCertTrusted() {
+	if isCertTrustedCheck() {
 		return nil
 	}
 
@@ -76,8 +62,7 @@ func TrustCertificate(config *Config) error {
 		fmt.Fprintf(os.Stderr, "warning: add-trusted-cert failed: %s\n", strings.TrimSpace(string(output)))
 	}
 
-	// Verify trust was set
-	if isCertTrusted() {
+	if isCertTrustedCheck() {
 		return nil
 	}
 
@@ -87,66 +72,17 @@ func TrustCertificate(config *Config) error {
 	return fmt.Errorf("certificate opened in Keychain Access - set 'Always Trust' for SSL, then restart your browser")
 }
 
-// isCertTrusted checks if the Caddy root CA has SSL trust settings configured
-func isCertTrusted() bool {
-	for _, domain := range []string{"", "-d"} {
-		args := []string{"dump-trust-settings"}
-		if domain != "" {
-			args = append(args, domain)
-		}
-		output, err := exec.Command("security", args...).CombinedOutput()
-		if err != nil {
-			continue
-		}
-		if checkTrustOutput(string(output)) {
-			return true
-		}
-	}
-	return false
-}
-
-// checkTrustOutput parses security dump-trust-settings output for Caddy cert trust
-func checkTrustOutput(output string) bool {
-	lines := strings.Split(output, "\n")
-	inCaddyCert := false
-	for _, line := range lines {
-		lower := strings.ToLower(line)
-		if strings.Contains(lower, "caddy local authority") {
-			inCaddyCert = true
-			continue
-		}
-		if inCaddyCert {
-			if strings.Contains(lower, "number of trust settings : 0") {
-				inCaddyCert = false
-				continue
-			}
-			if strings.Contains(lower, "policy oid") && strings.Contains(lower, "ssl") {
-				return true
-			}
-			if strings.HasPrefix(strings.TrimSpace(line), "Cert ") {
-				inCaddyCert = false
-			}
-		}
-	}
-	return false
-}
-
-// isCertTrustedCheck returns whether the certificate is already trusted (for setup flow)
+// isCertTrustedCheck tests if the proxy's TLS certificate is actually trusted
+// by making a real HTTPS connection. This is more reliable than parsing keychain
+// output, which can have stale certs from previous installations.
 func isCertTrustedCheck() bool {
-	return isCertTrusted()
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("https://proxy.localhost/_tls_check")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
 }
 
-// copyFileWithAdmin copies a file using admin privileges via osascript
-func copyFileWithAdmin(src, dst string) error {
-	// Try direct copy first
-	if err := copyFile(src, dst); err == nil {
-		return nil
-	}
 
-	script := fmt.Sprintf(`do shell script "cp %q %q" with administrator privileges`, src, dst)
-	cmd := exec.Command("osascript", "-e", script)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to copy file: %s: %w", string(output), err)
-	}
-	return nil
-}

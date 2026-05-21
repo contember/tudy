@@ -52,14 +52,3 @@ func isCertTrustedCheck() bool {
 	return false
 }
 
-// copyFileWithAdmin copies a file, falling back to sudo cp
-func copyFileWithAdmin(src, dst string) error {
-	// Try direct copy first
-	if err := copyFile(src, dst); err == nil {
-		return nil
-	}
-
-	// Fall back to sudo
-	fmt.Fprintf(os.Stderr, "Need elevated privileges to write to %s\n", dst)
-	return fmt.Errorf("permission denied: run with sudo or fix file permissions on %s", dst)
-}

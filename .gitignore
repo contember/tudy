@@ -23,6 +23,7 @@ vendor/
 .env
 .env.local
 .env.*.local
+/env
 
 # Data
 /data/
@@ -33,5 +34,8 @@ docker-compose.override.yml
 
 # Build artifacts
 /build/
-cmd/menubar/menubar
+/caddy
+/caddy-llm-proxy
+/tudy-dev
+cmd/cli/tudy-test
 cmd/cli/cli
