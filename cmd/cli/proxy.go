@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"net/http"
 	"os"
@@ -57,8 +56,12 @@ func isAdminAPIResponding() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// isProcessRunning checks if the daemon (caddy) process is running.
+// Matches "tudy-bin" specifically — matching "tudy" would also match
+// the calling CLI process itself, causing false positives in waitForStart
+// and self-kills in stopViaKill.
 func isProcessRunning() bool {
-	cmd := exec.Command("pgrep", "-f", "tudy")
+	cmd := exec.Command("pgrep", "-f", "tudy-bin")
 	err := cmd.Run()
 	return err == nil
 }
@@ -148,11 +151,11 @@ func StopProxy(config *Config) error {
 
 func stopViaKill() error {
 	if isProcessRunning() {
-		exec.Command("pkill", "-f", "tudy").Run()
+		exec.Command("pkill", "-f", "tudy-bin").Run()
 		time.Sleep(500 * time.Millisecond)
 
 		if isProcessRunning() {
-			script := `do shell script "pkill -f tudy; exit 0" with administrator privileges`
+			script := `do shell script "pkill -f tudy-bin; exit 0" with administrator privileges`
 			exec.Command("osascript", "-e", script).Run()
 		}
 	}
@@ -170,15 +173,10 @@ func stopViaKill() error {
 	return nil
 }
 
+// RestartProxy performs a full stop+start. Hot-reload via Caddy's admin API
+// would be faster but doesn't re-source the env file, so changes to
+// LLM_API_KEY etc. would silently not take effect.
 func RestartProxy(config *Config) error {
-	// Try hot reload first (preserves state, faster)
-	if isAdminAPIResponding() {
-		if reloaded := tryHotReload(config); reloaded {
-			return nil
-		}
-	}
-
-	// Hot reload failed or not possible — full stop+start to pick up env changes
 	if err := StopProxy(config); err != nil {
 		return fmt.Errorf("failed to stop: %w", err)
 	}
@@ -191,27 +189,6 @@ func RestartProxy(config *Config) error {
 	}
 
 	return StartProxy(config)
-}
-
-func tryHotReload(config *Config) bool {
-	caddyfileContent, err := os.ReadFile(config.CaddyFile)
-	if err != nil {
-		return false
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("POST", adminAPI+"/load", bytes.NewReader(caddyfileContent))
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Content-Type", "text/caddyfile")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
 }
 
 func escapeAppleScript(s string) string {
