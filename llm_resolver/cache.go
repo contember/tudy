@@ -110,22 +110,30 @@ func (c *Cache) Save() error {
 	return nil
 }
 
-// Get retrieves a mapping by hostname
+// Get retrieves a mapping by hostname. The returned pointer is a snapshot;
+// mutating it does not affect the cache.
 func (c *Cache) Get(hostname string) *RouteMapping {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.mappings[hostname]
+	m, ok := c.mappings[hostname]
+	if !ok {
+		return nil
+	}
+	snapshot := *m
+	return &snapshot
 }
 
-// Set stores a mapping for a hostname
+// Set stores a mapping for a hostname. The caller's struct is not retained
+// or mutated; the cache stores an internal copy.
 func (c *Cache) Set(hostname string, mapping *RouteMapping) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if mapping.CreatedAt == "" {
-		mapping.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	stored := *mapping
+	if stored.CreatedAt == "" {
+		stored.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	c.mappings[hostname] = mapping
+	c.mappings[hostname] = &stored
 }
 
 // Delete removes a mapping
