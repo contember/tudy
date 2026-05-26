@@ -82,14 +82,20 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 			zap.Bool("forced", force),
 		)
 
-		// Use singleflight to deduplicate concurrent requests for same hostname
+		// Use singleflight to deduplicate concurrent requests for same hostname.
+		// Trade-off: the call is owned by whichever request arrived first
+		// ("the leader"); if that request's context is canceled, the LLM call
+		// is aborted and all current followers also fail. That's acceptable
+		// here — followers will simply retry on the next request, which is
+		// cheaper than letting a stalled call block every waiter for the full
+		// HTTP timeout.
 		result, err, shared := m.resolveGroup.Do(hostname, func() (interface{}, error) {
 			// Double-check cache inside singleflight (another request may have just finished)
 			if cached := m.cache.Get(hostname); cached != nil && !force {
 				return cached, nil
 			}
 
-			resolved, err := m.resolver.ResolveTarget(hostname, userPrompt, m.cache.GetAll())
+			resolved, err := m.resolver.ResolveTarget(r.Context(), hostname, userPrompt, m.cache.GetAll())
 			if err != nil {
 				return nil, err
 			}
@@ -185,7 +191,13 @@ func (m *LLMResolver) handleSecondLevelProxy(w http.ResponseWriter, r *http.Requ
 	}
 
 	if mapping == nil {
-		// Use singleflight to deduplicate concurrent requests for same cache key
+		// Use singleflight to deduplicate concurrent requests for same cache key.
+		// Trade-off: the call is owned by whichever request arrived first
+		// ("the leader"); if that request's context is canceled, the LLM call
+		// is aborted and all current followers also fail. That's acceptable
+		// here — followers will simply retry on the next request, which is
+		// cheaper than letting a stalled call block every waiter for the full
+		// HTTP timeout.
 		result, err, shared := m.resolveGroup.Do(cacheKey, func() (interface{}, error) {
 			// Double-check cache inside singleflight
 			if cached := m.cache.Get(cacheKey); cached != nil && !force {
@@ -196,6 +208,7 @@ func (m *LLMResolver) handleSecondLevelProxy(w http.ResponseWriter, r *http.Requ
 			originMapping := m.cache.Get(originHostname)
 
 			resolved, err := m.resolver.ResolveRelatedService(
+				r.Context(),
 				originHostname,
 				originMapping,
 				serviceName,

@@ -2,6 +2,7 @@ package llm_resolver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,8 +58,11 @@ type LLMResponse struct {
 	CommandPattern string `json:"commandPattern,omitempty"` // Optional regex to match command
 }
 
-// ResolveTarget resolves a hostname to a target using the LLM
-func (r *Resolver) ResolveTarget(hostname, userPrompt string, existingMappings Mappings) (*RouteMapping, error) {
+// ResolveTarget resolves a hostname to a target using the LLM.
+// The provided context is plumbed down to the outbound LLM HTTP call so that
+// cancellation of the inbound request (e.g. client disconnect) aborts the
+// outbound request instead of waiting out the full client timeout.
+func (r *Resolver) ResolveTarget(ctx context.Context, hostname, userPrompt string, existingMappings Mappings) (*RouteMapping, error) {
 	if r.apiKey == "" {
 		return nil, fmt.Errorf("API key is not set")
 	}
@@ -77,7 +81,7 @@ func (r *Resolver) ResolveTarget(hostname, userPrompt string, existingMappings M
 	prompt := r.buildPrompt(hostname, processes, containers, existingMappings, userPrompt)
 	systemPrompt := r.getSystemPrompt()
 
-	response, err := r.callLLM(systemPrompt, prompt)
+	response, err := r.callLLM(ctx, systemPrompt, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +105,12 @@ func (r *Resolver) ResolveTarget(hostname, userPrompt string, existingMappings M
 	return mapping, nil
 }
 
-// ResolveRelatedService resolves a related service for an origin hostname
+// ResolveRelatedService resolves a related service for an origin hostname.
+// The provided context is plumbed down to the outbound LLM HTTP call so that
+// cancellation of the inbound request (e.g. client disconnect) aborts the
+// outbound request instead of waiting out the full client timeout.
 func (r *Resolver) ResolveRelatedService(
+	ctx context.Context,
 	originHostname string,
 	originMapping *RouteMapping,
 	serviceName string,
@@ -127,7 +135,7 @@ func (r *Resolver) ResolveRelatedService(
 	prompt := r.buildRelatedServicePrompt(originHostname, originMapping, serviceName, processes, containers, existingMappings, userPrompt)
 	systemPrompt := r.getRelatedServiceSystemPrompt()
 
-	response, err := r.callLLM(systemPrompt, prompt)
+	response, err := r.callLLM(ctx, systemPrompt, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +365,7 @@ func (r *Resolver) buildRelatedServicePrompt(
 	return b.String()
 }
 
-func (r *Resolver) callLLM(systemPrompt, userPrompt string) (*LLMResponse, error) {
+func (r *Resolver) callLLM(ctx context.Context, systemPrompt, userPrompt string) (*LLMResponse, error) {
 	requestBody := map[string]interface{}{
 		"model": r.model,
 		"messages": []map[string]string{
@@ -372,7 +380,7 @@ func (r *Resolver) callLLM(systemPrompt, userPrompt string) (*LLMResponse, error
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", r.apiURL, bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", r.apiURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
