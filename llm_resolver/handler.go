@@ -68,7 +68,6 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 
 	// Get or resolve target
 	var mapping *RouteMapping
-	var err error
 
 	if !force {
 		mapping = m.cache.Get(hostname)
@@ -110,7 +109,12 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 			return nil
 		}
 
-		mapping = result.(*RouteMapping)
+		mapping, _ = result.(*RouteMapping)
+		if mapping == nil {
+			m.logger.Error("singleflight returned nil mapping", zap.String("hostname", hostname))
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return nil
+		}
 
 		m.logger.Info("resolved target",
 			zap.String("hostname", hostname),
@@ -172,7 +176,6 @@ func (m *LLMResolver) handleSecondLevelProxy(w http.ResponseWriter, r *http.Requ
 	cacheKey := fmt.Sprintf("%s:%s", originHostname, serviceName)
 
 	var mapping *RouteMapping
-	var err error
 
 	if !force {
 		mapping = m.cache.Get(cacheKey)
@@ -219,7 +222,12 @@ func (m *LLMResolver) handleSecondLevelProxy(w http.ResponseWriter, r *http.Requ
 			return nil
 		}
 
-		mapping = result.(*RouteMapping)
+		mapping, _ = result.(*RouteMapping)
+		if mapping == nil {
+			m.logger.Error("singleflight returned nil mapping", zap.String("cacheKey", cacheKey))
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return nil
+		}
 
 		m.logger.Info("resolved related service",
 			zap.String("origin", originHostname),
