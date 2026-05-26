@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -1073,16 +1074,34 @@ func (m *LLMResolver) handleDebugHTML(w http.ResponseWriter, r *http.Request) er
 
 // handleMappingsAPI handles CRUD operations for mappings
 func (m *LLMResolver) handleMappingsAPI(w http.ResponseWriter, r *http.Request) error {
-	hostname := strings.TrimPrefix(r.URL.Path, "/_api/mappings/")
-	hostname = strings.TrimSuffix(hostname, "/")
+	remainder := strings.TrimPrefix(r.URL.Path, "/_api/mappings/")
+
+	// Collection endpoint: list all mappings on GET, 404 otherwise.
+	if remainder == "" || remainder == "/" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return nil
+		}
+		w.Header().Set("Content-Type", "application/json")
+		return json.NewEncoder(w).Encode(m.cache.GetAll())
+	}
+
+	// Strip a single trailing slash, then URL-decode the hostname segment.
+	remainder = strings.TrimSuffix(remainder, "/")
+	hostname, err := url.PathUnescape(remainder)
+	if err != nil {
+		http.Error(w, "Invalid hostname encoding", http.StatusBadRequest)
+		return nil
+	}
+	// Reject anything that still looks like a path (e.g. "/_api/mappings//foo"
+	// reduced to "/foo", or path-traversal-style inputs).
+	if hostname == "" || strings.Contains(hostname, "/") {
+		http.Error(w, "Invalid hostname", http.StatusBadRequest)
+		return nil
+	}
 
 	switch r.Method {
 	case http.MethodGet:
-		if hostname == "" {
-			// List all mappings
-			w.Header().Set("Content-Type", "application/json")
-			return json.NewEncoder(w).Encode(m.cache.GetAll())
-		}
 		// Get specific mapping
 		mapping := m.cache.Get(hostname)
 		if mapping == nil {
