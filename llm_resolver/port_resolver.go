@@ -4,7 +4,18 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 )
+
+// compiledPatterns caches compiled regexes for matchesCommand keyed by the
+// pattern string. Values are either *regexp.Regexp (successful compile) or
+// invalidPatternSentinel for patterns that previously failed to compile.
+var compiledPatterns sync.Map
+
+// invalidPatternSentinel is stored in compiledPatterns when a pattern fails
+// to compile, so subsequent calls skip regexp.Compile and fall back to
+// substring matching immediately.
+var invalidPatternSentinel = struct{}{}
 
 // ResolveProcessPort finds the current port for a process identified by ProcessIdentifier.
 // It uses the ProcessCache to get current processes and matches against the identifier.
@@ -81,13 +92,26 @@ func matchesWorkdir(processWorkdir, targetWorkdir string) bool {
 	return false
 }
 
-// matchesCommand checks if a process matches the command pattern regex
+// matchesCommand checks if a process matches the command pattern regex.
+// Compiled regexes are cached per pattern so hot lookups don't repeatedly
+// pay the regexp.Compile cost; patterns that fail to compile are remembered
+// via invalidPatternSentinel and fall back to substring matching.
 func matchesCommand(proc LocalProcess, pattern string) bool {
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		// Invalid regex, treat as literal substring match
+	if cached, ok := compiledPatterns.Load(pattern); ok {
+		if re, ok := cached.(*regexp.Regexp); ok {
+			return re.MatchString(proc.Command) || re.MatchString(proc.Args)
+		}
+		// Sentinel for an invalid pattern: fall back to substring match.
 		return strings.Contains(proc.Command, pattern) || strings.Contains(proc.Args, pattern)
 	}
 
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		// Invalid regex, remember the failure and fall back to literal substring match.
+		compiledPatterns.Store(pattern, invalidPatternSentinel)
+		return strings.Contains(proc.Command, pattern) || strings.Contains(proc.Args, pattern)
+	}
+
+	compiledPatterns.Store(pattern, re)
 	return re.MatchString(proc.Command) || re.MatchString(proc.Args)
 }

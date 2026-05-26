@@ -15,6 +15,11 @@ import (
 
 const defaultAPIURL = "https://openrouter.ai/api/v1/chat/completions"
 
+var (
+	markdownPrefixRe = regexp.MustCompile(`^` + "```" + `(?:json)?\s*`)
+	markdownSuffixRe = regexp.MustCompile(`\s*` + "```" + `$`)
+)
+
 // Resolver handles LLM-based target resolution
 type Resolver struct {
 	apiKey         string
@@ -427,12 +432,10 @@ func (r *Resolver) callLLM(systemPrompt, userPrompt string) (*LLMResponse, error
 // stripMarkdownCodeBlocks removes markdown code block markers
 func stripMarkdownCodeBlocks(content string) string {
 	// Remove leading ```json or ```
-	re := regexp.MustCompile(`^` + "```" + `(?:json)?\s*`)
-	content = re.ReplaceAllString(content, "")
+	content = markdownPrefixRe.ReplaceAllString(content, "")
 
 	// Remove trailing ```
-	re = regexp.MustCompile(`\s*` + "```" + `$`)
-	content = re.ReplaceAllString(content, "")
+	content = markdownSuffixRe.ReplaceAllString(content, "")
 
 	return strings.TrimSpace(content)
 }
