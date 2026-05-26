@@ -126,12 +126,15 @@ func (m *LLMResolver) Validate() error {
 		return fmt.Errorf("cache directory not writable: %v", err)
 	}
 
-	// Test write access by creating a temp file
-	testFile := m.CacheFile + ".test"
-	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+	// Test write access by creating a unique temp file (avoids races
+	// between concurrent reloads or multiple tudy instances).
+	f, err := os.CreateTemp(dir, ".tudy-write-test-*")
+	if err != nil {
 		return fmt.Errorf("cache file not writable: %v", err)
 	}
-	os.Remove(testFile)
+	name := f.Name()
+	f.Close()
+	os.Remove(name)
 
 	return nil
 }
