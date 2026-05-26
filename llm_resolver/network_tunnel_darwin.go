@@ -47,6 +47,17 @@ type NetworkTunnel struct {
 	mu    sync.Mutex
 	cache map[string]reachabilityEntry
 
+	// gens tracks a per-key generation counter, guarded by mu.
+	// It exists to close a race between InvalidateReachability and an
+	// in-flight probe: Forget on the singleflight group frees the slot
+	// for new callers, but it cannot stop the in-flight closure from
+	// calling storeCache. We snapshot the generation before the probe
+	// runs and only persist the result if the generation is unchanged.
+	//
+	// gens is pruned alongside cache entries in evictLocked so the map
+	// stays bounded with the cache itself.
+	gens map[string]uint64
+
 	// dedupe concurrent probes for the same target
 	probeGroup singleflight.Group
 
@@ -75,6 +86,7 @@ func NewNetworkTunnel(logger *zap.Logger) *NetworkTunnel {
 	return &NetworkTunnel{
 		logger: logger,
 		cache:  make(map[string]reachabilityEntry),
+		gens:   make(map[string]uint64),
 		probe:  probeTCP,
 	}
 }
@@ -145,8 +157,13 @@ func (nt *NetworkTunnel) IsReachable(ip string, port int) bool {
 		if r, ok := nt.lookupCache(key); ok {
 			return r, nil
 		}
+		// Snapshot the generation before probing. If InvalidateReachability
+		// runs while the probe is in flight, it will bump gens[key] and
+		// storeCacheIfGen will drop our (now stale) result instead of
+		// repopulating the entry we just cleared.
+		startGen := nt.currentGen(key)
 		reachable := nt.probe(ip, port)
-		nt.storeCache(key, reachable)
+		nt.storeCacheIfGen(key, reachable, startGen)
 		return reachable, nil
 	})
 	if b, ok := result.(bool); ok {
@@ -159,15 +176,30 @@ func (nt *NetworkTunnel) IsReachable(ip string, port int) bool {
 // target and forgets any in-flight singleflight probe, so the next
 // IsReachable call performs a fresh probe rather than receiving the
 // pre-invalidation leader's result.
+//
+// Bumping gens[key] under the same lock that guards the cache delete is
+// what closes the in-flight-probe race: an already-running probe captured
+// the pre-bump generation, so its eventual storeCacheIfGen will see the
+// mismatch and discard the (potentially stale) result instead of
+// repopulating the entry we just cleared.
 func (nt *NetworkTunnel) InvalidateReachability(ip string, port int) {
 	key := ip + ":" + strconv.Itoa(port)
 	nt.mu.Lock()
+	nt.gens[key]++
 	delete(nt.cache, key)
 	nt.mu.Unlock()
-	// Forget the singleflight key so concurrent waiters don't receive
-	// the pre-invalidate leader's result, and so a concurrent storeCache
-	// from the in-flight probe can't re-populate the entry we just cleared.
+	// Forget the singleflight key so new callers don't attach to the
+	// pre-invalidate leader's result. The generation guard above is what
+	// prevents the in-flight probe from repopulating the cache.
 	nt.probeGroup.Forget(key)
+}
+
+// currentGen returns the generation counter for key. Cheap helper so the
+// caller doesn't have to take the mutex inline at the probe site.
+func (nt *NetworkTunnel) currentGen(key string) uint64 {
+	nt.mu.Lock()
+	defer nt.mu.Unlock()
+	return nt.gens[key]
 }
 
 func (nt *NetworkTunnel) lookupCache(key string) (bool, bool) {
@@ -188,10 +220,23 @@ func (nt *NetworkTunnel) lookupCache(key string) (bool, bool) {
 	return entry.reachable, true
 }
 
-func (nt *NetworkTunnel) storeCache(key string, reachable bool) {
+// storeCacheIfGen stores the probe result for key only when the per-key
+// generation is still equal to startGen. A mismatch means
+// InvalidateReachability ran while the probe was in flight, so the
+// result is potentially stale and must not repopulate the entry the
+// invalidator just cleared.
+func (nt *NetworkTunnel) storeCacheIfGen(key string, reachable bool, startGen uint64) {
 	nt.mu.Lock()
 	defer nt.mu.Unlock()
+	if nt.gens[key] != startGen {
+		// Invalidated while we were probing — drop the result.
+		return
+	}
+	nt.storeCacheLocked(key, reachable)
+}
 
+// storeCacheLocked is the shared cache-write path. Caller must hold nt.mu.
+func (nt *NetworkTunnel) storeCacheLocked(key string, reachable bool) {
 	// Sweep expired entries when we approach the cap, and evict the
 	// oldest if still over after the sweep. Keeps the map bounded even
 	// if many distinct targets are probed over a long-running proxy.
@@ -204,6 +249,13 @@ func (nt *NetworkTunnel) storeCache(key string, reachable bool) {
 
 // evictLocked drops expired entries and, if still over the cap, the
 // oldest entry. Caller must hold nt.mu.
+//
+// gens entries are pruned alongside their cache counterparts so the
+// generation map stays bounded together with the cache. A key with no
+// cache entry has no in-flight probe attached (the probe runs to
+// completion and either writes the cache or is discarded by the gen
+// check), so dropping its gen counter cannot cause a stale write to
+// slip through later.
 func (nt *NetworkTunnel) evictLocked() {
 	now := time.Now()
 	for k, e := range nt.cache {
@@ -213,6 +265,7 @@ func (nt *NetworkTunnel) evictLocked() {
 		}
 		if now.Sub(e.checkedAt) >= ttl {
 			delete(nt.cache, k)
+			delete(nt.gens, k)
 		}
 	}
 	if len(nt.cache) < reachabilityCacheMax {
@@ -228,6 +281,7 @@ func (nt *NetworkTunnel) evictLocked() {
 	}
 	if oldestKey != "" {
 		delete(nt.cache, oldestKey)
+		delete(nt.gens, oldestKey)
 	}
 }
 
