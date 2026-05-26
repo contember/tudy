@@ -1100,6 +1100,27 @@ func (m *LLMResolver) handleMappingsAPI(w http.ResponseWriter, r *http.Request) 
 		return nil
 	}
 
+	// Lightweight auth for state-changing methods: the dashboard at
+	// proxy.localhost is the only legitimate caller, so we require the
+	// request's Host to be proxy.localhost. A malicious page on
+	// foo.localhost would arrive with Host: foo.localhost and be rejected.
+	// We also require the Origin header (when present) to be proxy.localhost
+	// — some browsers omit Origin on same-origin requests, so a missing
+	// Origin is allowed when Host already matches. GET is left open: it's
+	// read-only and CORS prevents cross-origin pages from reading the
+	// response without a preflight we never grant.
+	if r.Method == http.MethodPut || r.Method == http.MethodDelete {
+		if extractHostname(r) != "proxy.localhost" {
+			http.Error(w, "Forbidden: mappings API can only be modified from proxy.localhost", http.StatusForbidden)
+			return nil
+		}
+		if origin := r.Header.Get("Origin"); origin != "" &&
+			origin != "http://proxy.localhost" && origin != "https://proxy.localhost" {
+			http.Error(w, "Forbidden: invalid Origin", http.StatusForbidden)
+			return nil
+		}
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		// Get specific mapping
