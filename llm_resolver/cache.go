@@ -34,6 +34,7 @@ type Mappings map[string]*RouteMapping
 // Cache manages hostname to target mappings with persistence
 type Cache struct {
 	mu       sync.RWMutex
+	saveMu   sync.Mutex
 	mappings Mappings
 	filePath string
 	logger   *zap.Logger
@@ -67,10 +68,22 @@ func (c *Cache) Load() error {
 
 // Save writes mappings to the cache file atomically
 func (c *Cache) Save() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// Take a snapshot under the data lock so readers don't stall on disk I/O.
+	c.mu.RLock()
+	snapshot := make(Mappings, len(c.mappings))
+	for k, v := range c.mappings {
+		// Copy the mapping to avoid race conditions
+		copy := *v
+		snapshot[k] = &copy
+	}
+	c.mu.RUnlock()
 
-	data, err := json.MarshalIndent(c.mappings, "", "  ")
+	// Serialize concurrent Save calls so they don't race on the same .tmp path,
+	// without blocking readers.
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+
+	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -84,10 +97,17 @@ func (c *Cache) Save() error {
 	// Write to temp file first, then rename for atomicity
 	tmpFile := c.filePath + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		// Best-effort cleanup of any partial tmp file.
+		_ = os.Remove(tmpFile)
 		return err
 	}
 
-	return os.Rename(tmpFile, c.filePath)
+	if err := os.Rename(tmpFile, c.filePath); err != nil {
+		// Best-effort cleanup; rename may have left the tmp file behind.
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	return nil
 }
 
 // Get retrieves a mapping by hostname
