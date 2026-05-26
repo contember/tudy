@@ -1,28 +1,28 @@
 class Tudy < Formula
   desc "AI-powered local development proxy"
   homepage "https://github.com/contember/tudy"
-  version "0.5.2"
+  version "0.6.0"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/contember/tudy/releases/download/v#{version}/tudy-darwin-arm64.tar.gz"
-      sha256 "ac6437c18d72bd4800534e8487ea7032da04337ed9971f21ee61bc3d2237897d"
+      sha256 "70f8ffa80e2591db530b24969ff272d2f3265642d92bd6bf7526a520f670728b"
     end
     on_intel do
       url "https://github.com/contember/tudy/releases/download/v#{version}/tudy-darwin-amd64.tar.gz"
-      sha256 "e748ff955768969223520bdd773fc3132d3ce679219b8cd24fb438189d989651"
+      sha256 "84c0cc638dff1be6985301693792425a694c672bac8055b1b645ae48807e3158"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/contember/tudy/releases/download/v#{version}/tudy-linux-arm64.tar.gz"
-      sha256 "1f6284c3d7f511a54ce130aa9456f49106762803d3af64aade8d884930814e86"
+      sha256 "a3af47c685c541e55e917f51b21b0c51453d7d363fefee5db48989fdbbc8b400"
     end
     on_intel do
       url "https://github.com/contember/tudy/releases/download/v#{version}/tudy-linux-amd64.tar.gz"
-      sha256 "7fb0155625b18d0d0a6639950f1332e5624aa4e1e7f26746133dc38b45999edb"
+      sha256 "efadd9f5aa6c8c6e8c1d80038245e88093f9ee1eced585dfe69bdd62a59c9d71"
     end
   end
 
