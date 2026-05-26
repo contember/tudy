@@ -1213,13 +1213,15 @@ func extractHostname(r *http.Request) string {
 		// Remove brackets for cleaner hostname
 		host = strings.TrimPrefix(host, "[")
 		host = strings.TrimSuffix(host, "]")
-		return host
+		return strings.ToLower(host)
 	}
 	// IPv4 or hostname: remove port if present
 	if idx := strings.LastIndex(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
-	return host
+	// Hostnames are case-insensitive per RFC; normalize to lowercase so
+	// "Myapp.LOCALHOST" and "myapp.localhost" share a cache key.
+	return strings.ToLower(host)
 }
 
 // timeNow returns the current time as ISO string
