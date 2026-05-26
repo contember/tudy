@@ -24,3 +24,12 @@ func (nt *NetworkTunnel) Stop() {}
 func (nt *NetworkTunnel) IsRunning() bool {
 	return false
 }
+
+// IsReachable is unused on non-macOS — IsRunning is false, so the
+// tunnel branch in buildUpstreamURL is never taken on Linux/Windows.
+func (nt *NetworkTunnel) IsReachable(ip string, port int) bool {
+	return false
+}
+
+// InvalidateReachability is a no-op on non-macOS.
+func (nt *NetworkTunnel) InvalidateReachability(ip string, port int) {}

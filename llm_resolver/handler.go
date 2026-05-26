@@ -3,7 +3,9 @@ package llm_resolver
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1150,30 +1152,49 @@ func (m *LLMResolver) buildUpstreamURL(mapping *RouteMapping) (string, error) {
 		return fmt.Sprintf("127.0.0.1:%d", port), nil
 	}
 
-	// Docker container — if network tunnel is active, use container IP directly
-	if m.networkTunnel != nil && m.networkTunnel.IsRunning() {
+	// Docker container — if network tunnel is active AND the destination is
+	// actually reachable, use container IP directly. We probe reachability
+	// because a competing VPN can claim Docker subnets and silently steal
+	// traffic; the dmnc process being up isn't proof packets get there.
+	if m.networkTunnel != nil && m.networkTunnel.IsRunning() && mapping.Port != 0 {
 		ip, err := GetContainerIP(mapping.Target)
-		if err == nil && ip != "" {
-			return fmt.Sprintf("%s:%d", ip, mapping.Port), nil
+		if err == nil && ip != "" && m.networkTunnel.IsReachable(ip, mapping.Port) {
+			return net.JoinHostPort(ip, strconv.Itoa(mapping.Port)), nil
 		}
-		m.logger.Warn("tunnel active but cannot resolve container IP, trying published port",
-			zap.String("container", mapping.Target),
-			zap.Error(err),
-		)
+		if err != nil || ip == "" {
+			m.logger.Warn("tunnel active but cannot resolve container IP, trying published port",
+				zap.String("container", mapping.Target),
+				zap.Error(err),
+			)
+		} else {
+			m.logger.Warn("tunnel active but container IP not reachable, trying published port (another VPN may be claiming this Docker subnet)",
+				zap.String("container", mapping.Target),
+				zap.String("ip", ip),
+				zap.Int("port", mapping.Port),
+			)
+		}
 	}
 
 	// Try published port (required on macOS/Windows without tunnel)
 	if hostIP, hostPort, found := GetContainerHostAddress(mapping.Target, mapping.Port); found {
-		return fmt.Sprintf("%s:%d", hostIP, hostPort), nil
+		return net.JoinHostPort(hostIP, strconv.Itoa(hostPort)), nil
 	}
 
-	// Fall back to container IP (works on Linux or inside Docker on same network)
+	// Fall back to container IP (works on Linux or inside Docker on same network).
 	ip, err := GetContainerIP(mapping.Target)
 	if err != nil || ip == "" {
 		return "", fmt.Errorf("cannot resolve IP for container %s (no published port and container IP not reachable): %v", mapping.Target, err)
 	}
 
-	return fmt.Sprintf("%s:%d", ip, mapping.Port), nil
+	// If the tunnel is up, only return the container IP when we've actually
+	// confirmed reachability — otherwise we'd hand Caddy an IP we already
+	// know is unreachable (e.g. VPN-claimed subnet) and the request would
+	// eat a multi-second reverse_proxy dial timeout for nothing.
+	if m.networkTunnel != nil && m.networkTunnel.IsRunning() && mapping.Port != 0 && !m.networkTunnel.IsReachable(ip, mapping.Port) {
+		return "", fmt.Errorf("container %s at %s:%d not reachable (no published port and container IP not routable; a VPN may be claiming this Docker subnet)", mapping.Target, ip, mapping.Port)
+	}
+
+	return net.JoinHostPort(ip, strconv.Itoa(mapping.Port)), nil
 }
 
 // extractHostname extracts the hostname from the request, removing the port
