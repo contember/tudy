@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
-"strings"
+	"strings"
 	"time"
 )
 
@@ -64,7 +64,10 @@ type dockerInspectOutput struct {
 	} `json:"Config"`
 }
 
-// DiscoverDockerContainers discovers running Docker containers
+// DiscoverDockerContainers discovers running Docker containers.
+//
+// Performs a single `docker ps` followed by a single batched `docker inspect`
+// covering all returned container IDs, rather than one inspect per container.
 func DiscoverDockerContainers(ownComposeProject string) ([]DockerContainer, error) {
 	// If docker isn't on PATH, skip launching a doomed process.
 	if _, err := exec.LookPath("docker"); err != nil {
@@ -78,67 +81,74 @@ func DiscoverDockerContainers(ownComposeProject string) ([]DockerContainer, erro
 
 	// Get running containers. Any error here (daemon unreachable, permission
 	// denied, etc.) is treated as "Docker not available".
-	cmd := exec.CommandContext(ctx, "docker", "ps", "--format", "{{json .}}")
-	output, err := cmd.Output()
+	psCmd := exec.CommandContext(ctx, "docker", "ps", "--format", "{{json .}}")
+	psOutput, err := psCmd.Output()
 	if err != nil {
 		return nil, nil
 	}
 
-	var containers []DockerContainer
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	for _, line := range lines {
+	// Collect container IDs in source order so the final slice order is stable.
+	psLines := strings.Split(strings.TrimSpace(string(psOutput)), "\n")
+	containerIDs := make([]string, 0, len(psLines))
+	for _, line := range psLines {
 		if line == "" {
 			continue
 		}
-
 		var ps dockerPsOutput
 		if err := json.Unmarshal([]byte(line), &ps); err != nil {
 			continue
 		}
-
-		// Get detailed container info
-		details, err := getContainerDetails(ps.ID)
-		if err != nil || details == nil {
-			continue
+		if ps.ID != "" {
+			containerIDs = append(containerIDs, ps.ID)
 		}
+	}
+
+	if len(containerIDs) == 0 {
+		return nil, nil
+	}
+
+	// Batched docker inspect: pass all IDs in a single call.
+	inspectCtx, inspectCancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer inspectCancel()
+
+	inspectArgs := append([]string{"inspect"}, containerIDs...)
+	inspectCmd := exec.CommandContext(inspectCtx, "docker", inspectArgs...)
+	inspectOutput, err := inspectCmd.Output()
+	if err != nil && len(inspectOutput) == 0 {
+		return nil, err
+	}
+
+	var inspectData []dockerInspectOutput
+	if err := json.Unmarshal(inspectOutput, &inspectData); err != nil {
+		return nil, err
+	}
+
+	containers := make([]DockerContainer, 0, len(inspectData))
+	for i, data := range inspectData {
+		// Use the corresponding ID from the ps list; defensive in case the
+		// inspect output ordering somehow diverges.
+		var id string
+		if i < len(containerIDs) {
+			id = containerIDs[i]
+		}
+
+		c := buildDockerContainer(id, data)
 
 		// Filter out containers from our own compose project
 		if ownComposeProject != "" {
-			containerProject := details.Labels["com.docker.compose.project"]
-			if containerProject == ownComposeProject {
+			if c.Labels["com.docker.compose.project"] == ownComposeProject {
 				continue
 			}
 		}
 
-		containers = append(containers, *details)
+		containers = append(containers, c)
 	}
 
 	return containers, nil
 }
 
-// getContainerDetails gets detailed information about a container
-func getContainerDetails(containerID string) (*DockerContainer, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "docker", "inspect", containerID)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-
-	var inspectData []dockerInspectOutput
-	if err := json.Unmarshal(output, &inspectData); err != nil {
-		return nil, err
-	}
-
-	if len(inspectData) == 0 {
-		return nil, nil
-	}
-
-	data := inspectData[0]
-
+// buildDockerContainer assembles a DockerContainer from a docker inspect entry.
+func buildDockerContainer(containerID string, data dockerInspectOutput) DockerContainer {
 	// Get first available network and IP
 	var ip, network string
 	for netName, netConfig := range data.NetworkSettings.Networks {
@@ -200,7 +210,7 @@ func getContainerDetails(containerID string) (*DockerContainer, error) {
 	// Clean container name (remove leading /)
 	name := strings.TrimPrefix(data.Name, "/")
 
-	return &DockerContainer{
+	return DockerContainer{
 		ID:           containerID,
 		Name:         name,
 		Image:        data.Config.Image,
@@ -208,9 +218,34 @@ func getContainerDetails(containerID string) (*DockerContainer, error) {
 		PortMappings: portMappings,
 		IP:           ip,
 		Network:      network,
-		Workdir: workdir,
-		Labels:  data.Config.Labels,
-	}, nil
+		Workdir:      workdir,
+		Labels:       data.Config.Labels,
+	}
+}
+
+// getContainerDetails gets detailed information about a single container.
+// Used by GetContainerHostAddress where only one container is needed.
+func getContainerDetails(containerID string) (*DockerContainer, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "docker", "inspect", containerID)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	var inspectData []dockerInspectOutput
+	if err := json.Unmarshal(output, &inspectData); err != nil {
+		return nil, err
+	}
+
+	if len(inspectData) == 0 {
+		return nil, nil
+	}
+
+	c := buildDockerContainer(containerID, inspectData[0])
+	return &c, nil
 }
 
 // GetContainerIP gets the IP address of a container by name or ID

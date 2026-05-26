@@ -113,7 +113,9 @@ func DiscoverLocalProcesses() ([]LocalProcess, error) {
 	var err error
 
 	if runtime.GOOS == "darwin" {
-		// macOS: try lsof first, fallback to netstat
+		// macOS: try lsof first, fallback to netstat.
+		// Both already batch the per-PID info (args/workdir/ppid) into a single
+		// ps + lsof call each, so PPID is already populated.
 		processes, err = discoverWithLsof()
 		if err != nil || len(processes) == 0 {
 			processes, err = discoverWithNetstat()
@@ -150,11 +152,10 @@ func DiscoverLocalProcesses() ([]LocalProcess, error) {
 		filtered = append(filtered, p)
 	}
 
-	// Add PPID to each process for child filtering
-	for i := range filtered {
-		if runtime.GOOS == "darwin" {
-			filtered[i].PPID = getProcessPPIDMac(filtered[i].PID)
-		} else {
+	// On Linux, PPID is free to read from /proc, so fill it in here.
+	// On macOS, PPID is already populated by the batched discovery call.
+	if runtime.GOOS != "darwin" {
+		for i := range filtered {
 			filtered[i].PPID = getProcessPPID(filtered[i].PID)
 		}
 	}
@@ -213,6 +214,13 @@ func shouldIgnoreByArgs(args string) bool {
 	return false
 }
 
+// macProcessInfo holds per-PID info batched on macOS.
+type macProcessInfo struct {
+	Args    string
+	Workdir string
+	PPID    int
+}
+
 // discoverWithLsof uses lsof to discover listening processes (macOS)
 // lsof -iTCP -sTCP:LISTEN -n -P
 func discoverWithLsof() ([]LocalProcess, error) {
@@ -229,7 +237,14 @@ func discoverWithLsof() ([]LocalProcess, error) {
 		}
 	}
 
-	var processes []LocalProcess
+	// First pass: collect (port, pid, command, bindAddr) tuples.
+	type candidate struct {
+		port     int
+		pid      int
+		command  string
+		bindAddr string
+	}
+	var candidates []candidate
 	seenPorts := make(map[int]bool)
 	lines := strings.Split(string(output), "\n")
 
@@ -278,17 +293,30 @@ func discoverWithLsof() ([]LocalProcess, error) {
 			bindAddr = name[:lastColon]
 		}
 
-		// Get full command args and workdir using ps and lsof
-		args := cleanArgs(getProcessArgsMac(pid))
-		workdir := getProcessWorkdirMac(pid)
+		candidates = append(candidates, candidate{
+			port:     port,
+			pid:      pid,
+			command:  command,
+			bindAddr: bindAddr,
+		})
+	}
 
+	// Second pass: collect unique PIDs and batch-fetch their info.
+	pids := uniquePIDs(candidates, func(i int) int { return candidates[i].pid })
+	info := getProcessInfoBatchMac(pids)
+
+	// Third pass: assemble LocalProcess entries.
+	processes := make([]LocalProcess, 0, len(candidates))
+	for _, c := range candidates {
+		pi := info[c.pid]
 		processes = append(processes, LocalProcess{
-			Port:     port,
-			PID:      pid,
-			BindAddr: bindAddr,
-			Command:  command,
-			Args:     args,
-			Workdir:  workdir,
+			Port:     c.port,
+			PID:      c.pid,
+			PPID:     pi.PPID,
+			BindAddr: c.bindAddr,
+			Command:  c.command,
+			Args:     cleanArgs(pi.Args),
+			Workdir:  pi.Workdir,
 		})
 	}
 
@@ -309,7 +337,14 @@ func discoverWithNetstat() ([]LocalProcess, error) {
 		}
 	}
 
-	var processes []LocalProcess
+	// First pass: collect (port, pid, command, bindAddr) tuples.
+	type candidate struct {
+		port     int
+		pid      int
+		command  string
+		bindAddr string
+	}
+	var candidates []candidate
 	seenPorts := make(map[int]bool)
 	lines := strings.Split(string(output), "\n")
 
@@ -364,57 +399,145 @@ func discoverWithNetstat() ([]LocalProcess, error) {
 			continue
 		}
 
-		args := cleanArgs(getProcessArgsMac(pid))
-		workdir := getProcessWorkdirMac(pid)
+		candidates = append(candidates, candidate{
+			port:     port,
+			pid:      pid,
+			command:  command,
+			bindAddr: bindAddr,
+		})
+	}
 
+	// Second pass: collect unique PIDs and batch-fetch their info.
+	pids := uniquePIDs(candidates, func(i int) int { return candidates[i].pid })
+	info := getProcessInfoBatchMac(pids)
+
+	// Third pass: assemble LocalProcess entries.
+	processes := make([]LocalProcess, 0, len(candidates))
+	for _, c := range candidates {
+		pi := info[c.pid]
 		processes = append(processes, LocalProcess{
-			Port:     port,
-			PID:      pid,
-			BindAddr: bindAddr,
-			Command:  command,
-			Args:     args,
-			Workdir:  workdir,
+			Port:     c.port,
+			PID:      c.pid,
+			PPID:     pi.PPID,
+			BindAddr: c.bindAddr,
+			Command:  c.command,
+			Args:     cleanArgs(pi.Args),
+			Workdir:  pi.Workdir,
 		})
 	}
 
 	return processes, nil
 }
 
-// getProcessArgsMac gets process arguments on macOS using ps
-func getProcessArgsMac(pid int) string {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "args=")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
+// uniquePIDs returns a slice of unique PIDs from a slice of candidates,
+// using getPID to extract the PID from each element.
+func uniquePIDs[T any](items []T, getPID func(int) int) []int {
+	seen := make(map[int]bool, len(items))
+	pids := make([]int, 0, len(items))
+	for i := range items {
+		pid := getPID(i)
+		if pid <= 0 || seen[pid] {
+			continue
+		}
+		seen[pid] = true
+		pids = append(pids, pid)
 	}
-	return strings.TrimSpace(string(output))
+	return pids
 }
 
-// getProcessWorkdirMac gets process working directory on macOS using lsof
-func getProcessWorkdirMac(pid int) string {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "lsof", "-a", "-p", strconv.Itoa(pid), "-Fn", "-d", "cwd")
-	output, err := cmd.Output()
-	if err != nil && len(output) == 0 {
-		return ""
+// getProcessInfoBatchMac fetches args, workdir, and ppid for a list of PIDs
+// using a single `ps` call and a single `lsof` call. Returns a map keyed by PID.
+//
+// `ps -p pid1,pid2,... -o pid=,ppid=,args=` returns one line per PID with the
+// fields requested (pid, ppid, args).
+//
+// `lsof -a -p pid1,pid2,... -Fpn -d cwd` returns interleaved `p<pid>` /
+// `n<path>` records for each PID.
+func getProcessInfoBatchMac(pids []int) map[int]macProcessInfo {
+	result := make(map[int]macProcessInfo, len(pids))
+	if len(pids) == 0 {
+		return result
 	}
 
-	// lsof output format:
-	// p12345
-	// fcwd
-	// n/path/to/workdir
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "n") {
-			return line[1:] // Remove 'n' prefix
+	pidArgs := make([]string, len(pids))
+	for i, p := range pids {
+		pidArgs[i] = strconv.Itoa(p)
+	}
+	pidList := strings.Join(pidArgs, ",")
+
+	// Batched ps call: pid, ppid, args.
+	psCtx, psCancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer psCancel()
+
+	psCmd := exec.CommandContext(psCtx, "ps", "-p", pidList, "-o", "pid=,ppid=,args=")
+	psOutput, err := psCmd.Output()
+	if err == nil || len(psOutput) > 0 {
+		for _, line := range strings.Split(string(psOutput), "\n") {
+			line = strings.TrimLeft(line, " ")
+			if line == "" {
+				continue
+			}
+			// Parse: "<pid> <ppid> <args...>"
+			// pid is the first whitespace-separated token, ppid is the second,
+			// the remainder is args (may contain whitespace).
+			sp1 := strings.IndexByte(line, ' ')
+			if sp1 < 0 {
+				continue
+			}
+			pid, err := strconv.Atoi(line[:sp1])
+			if err != nil {
+				continue
+			}
+			rest := strings.TrimLeft(line[sp1+1:], " ")
+			sp2 := strings.IndexByte(rest, ' ')
+			if sp2 < 0 {
+				// No args, just ppid.
+				ppid, _ := strconv.Atoi(strings.TrimSpace(rest))
+				info := result[pid]
+				info.PPID = ppid
+				result[pid] = info
+				continue
+			}
+			ppid, _ := strconv.Atoi(rest[:sp2])
+			args := strings.TrimSpace(rest[sp2+1:])
+			info := result[pid]
+			info.PPID = ppid
+			info.Args = args
+			result[pid] = info
 		}
 	}
-	return ""
+
+	// Batched lsof call: cwd for each PID. -Fpn outputs `p<pid>` then `n<path>`.
+	lsofCtx, lsofCancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer lsofCancel()
+
+	lsofCmd := exec.CommandContext(lsofCtx, "lsof", "-a", "-p", pidList, "-Fpn", "-d", "cwd")
+	lsofOutput, err := lsofCmd.Output()
+	if err == nil || len(lsofOutput) > 0 {
+		var currentPID int
+		for _, line := range strings.Split(string(lsofOutput), "\n") {
+			if line == "" {
+				continue
+			}
+			switch line[0] {
+			case 'p':
+				if p, err := strconv.Atoi(line[1:]); err == nil {
+					currentPID = p
+				} else {
+					currentPID = 0
+				}
+			case 'n':
+				if currentPID == 0 {
+					continue
+				}
+				info := result[currentPID]
+				info.Workdir = line[1:]
+				result[currentPID] = info
+			}
+		}
+	}
+
+	return result
 }
 
 // tryWithSs uses the ss command to discover processes (Linux, faster)
@@ -663,20 +786,6 @@ func getProcessPPID(pid int) int {
 		}
 	}
 	return 0
-}
-
-// getProcessPPIDMac gets the parent PID for a process (macOS)
-func getProcessPPIDMac(pid int) int {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "ppid=")
-	output, err := cmd.Output()
-	if err != nil {
-		return 0
-	}
-	ppid, _ := strconv.Atoi(strings.TrimSpace(string(output)))
-	return ppid
 }
 
 // cleanArgs cleans up command line args for better readability
