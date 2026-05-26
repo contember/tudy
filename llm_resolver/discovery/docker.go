@@ -66,21 +66,22 @@ type dockerInspectOutput struct {
 
 // DiscoverDockerContainers discovers running Docker containers
 func DiscoverDockerContainers(ownComposeProject string) ([]DockerContainer, error) {
+	// If docker isn't on PATH, skip launching a doomed process.
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil, nil
+	}
+
 	ensureDockerHost()
 
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	// Check if docker is available
-	if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {
-		return nil, nil // Docker not available, return empty list
-	}
-
-	// Get running containers
+	// Get running containers. Any error here (daemon unreachable, permission
+	// denied, etc.) is treated as "Docker not available".
 	cmd := exec.CommandContext(ctx, "docker", "ps", "--format", "{{json .}}")
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, nil
 	}
 
 	var containers []DockerContainer
