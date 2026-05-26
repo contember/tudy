@@ -4,6 +4,7 @@ package llm_resolver
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -263,5 +264,85 @@ func TestIsReachable_CacheBoundedAndEvictsOldest(t *testing.T) {
 
 	if size > reachabilityCacheMax {
 		t.Fatalf("cache exceeded cap: size=%d cap=%d", size, reachabilityCacheMax)
+	}
+}
+
+// newHealthTestTunnel constructs a tunnel with both probe and healthProbe
+// overridable. Marks dmnc as "running" so Start would have done the
+// initial probe + spawned the loop in production.
+func newHealthTestTunnel(health func() bool) *NetworkTunnel {
+	nt := NewNetworkTunnel(zap.NewNop())
+	if health != nil {
+		nt.healthProbe = health
+	}
+	nt.running.Store(true)
+	return nt
+}
+
+func TestHealthLoop_TransitionsAreLogged(t *testing.T) {
+	// We don't assert on log output here; the goal is just to confirm
+	// the loop reads probe results and flips the atomic accordingly
+	// without deadlocking on Stop.
+	var stage atomic.Int32
+	nt := newHealthTestTunnel(func() bool {
+		// 0: broken, 1: healthy, 2+: healthy
+		return stage.Load() >= 1
+	})
+
+	// Manually run one tick of the loop logic — drive transitions without
+	// waiting for the 30s ticker.
+	nt.healthy.Store(nt.healthProbe()) // broken
+	if nt.IsHealthy() {
+		t.Fatal("expected initial state to be broken")
+	}
+
+	stage.Store(1)
+	prev := nt.healthy.Swap(nt.healthProbe())
+	if prev || !nt.IsHealthy() {
+		t.Fatalf("expected transition broken→healthy, prev=%v now=%v", prev, nt.IsHealthy())
+	}
+}
+
+func TestHealthLoop_StopIsIdempotent(t *testing.T) {
+	nt := newHealthTestTunnel(func() bool { return true })
+
+	// Spawn the real loop, then stop it twice. Should not panic on
+	// double-close of stopCh.
+	go nt.healthLoop()
+	nt.Stop()
+	nt.Stop()
+}
+
+func TestProbeDmncTunnel_RefusedCountsAsHealthy(t *testing.T) {
+	// Listen on a port and immediately close — connections will be
+	// refused (no listener accepting). Verifies that ECONNREFUSED is
+	// treated as "tunnel alive" the same way the dmnc VM peer would
+	// signal a healthy tunnel by RST-ing unbound ports.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	// Temporarily redirect the probe target to our closed port.
+	orig := tunnelHealthTarget
+	tunnelHealthTarget = addr
+	defer func() { tunnelHealthTarget = orig }()
+
+	if !probeDmncTunnel() {
+		t.Fatal("expected ECONNREFUSED to count as healthy")
+	}
+}
+
+func TestProbeDmncTunnel_TimeoutIsUnhealthy(t *testing.T) {
+	// Use a TEST-NET-1 address (RFC 5737) — guaranteed unreachable,
+	// so the dial times out instead of getting RST.
+	orig := tunnelHealthTarget
+	tunnelHealthTarget = "192.0.2.1:22"
+	defer func() { tunnelHealthTarget = orig }()
+
+	if probeDmncTunnel() {
+		t.Fatal("expected unreachable target to be unhealthy")
 	}
 }

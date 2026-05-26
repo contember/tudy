@@ -341,6 +341,10 @@ type debugPageData struct {
 	ProcessCount         int
 	ContainerCount       int
 	LogCount             int
+	// TunnelStatus is "" (no banner), "broken" (dmnc up but tunnel dead),
+	// or other future states. Kept as a string so the template just does
+	// equality checks and we can add states without touching the schema.
+	TunnelStatus         string
 	Mappings             []debugMappingRow
 	Processes            []debugProcessRow
 	Containers           []debugContainerRow
@@ -487,6 +491,31 @@ var debugTmpl = template.Must(template.New("debug").Parse(`<!DOCTYPE html>
             width: 1px;
             height: 16px;
             background: var(--border);
+        }
+
+        /* ---- Banner ---- */
+        .banner {
+            padding: 12px 16px;
+            margin-bottom: 32px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-family: var(--sans);
+            border: 1px solid;
+            animation: fadeIn 0.4s ease-out 0.05s both;
+        }
+        .banner-warn {
+            background: rgba(212, 168, 67, 0.06);
+            border-color: rgba(212, 168, 67, 0.25);
+            color: var(--accent);
+        }
+        .banner strong { font-weight: 600; }
+        .banner code {
+            font-family: var(--mono);
+            font-size: 12px;
+            padding: 2px 6px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 3px;
+            color: var(--text);
         }
 
         /* ---- Stats ---- */
@@ -772,6 +801,15 @@ var debugTmpl = template.Must(template.New("debug").Parse(`<!DOCTYPE html>
             <span class="config-val">{{ .CacheFile }}</span>
         </div>
     </div>
+
+    {{ if eq .TunnelStatus "broken" }}
+    <div class="banner banner-warn">
+        <strong>Docker tunnel broken.</strong>
+        docker-mac-net-connect is running but its WireGuard peer inside Docker Desktop's VM is gone &mdash; usually after Docker restarts or upgrades. Container IPs aren't routable until dmnc is restarted.<br>
+        Restart now: <code>sudo brew services restart docker-mac-net-connect</code><br>
+        Prevent recurrence: <code>sudo scripts/install-dmnc-healer.sh</code>
+    </div>
+    {{ end }}
 
     <div class="stats">
         <div class="stat">
@@ -1169,6 +1207,11 @@ func (m *LLMResolver) handleDebugHTML(w http.ResponseWriter, r *http.Request) er
 		})
 	}
 
+	tunnelStatus := ""
+	if m.networkTunnel != nil && m.networkTunnel.IsRunning() && !m.networkTunnel.IsHealthy() {
+		tunnelStatus = "broken"
+	}
+
 	data := debugPageData{
 		Model:                m.Model,
 		CacheFile:            m.CacheFile,
@@ -1176,6 +1219,7 @@ func (m *LLMResolver) handleDebugHTML(w http.ResponseWriter, r *http.Request) er
 		ProcessCount:         len(processes),
 		ContainerCount:       len(containers),
 		LogCount:             len(logEntries),
+		TunnelStatus:         tunnelStatus,
 		Mappings:             mappingRows,
 		Processes:            processRows,
 		Containers:           containerRows,
@@ -1315,14 +1359,17 @@ func (m *LLMResolver) buildUpstreamURL(mapping *RouteMapping) (string, error) {
 		return fmt.Sprintf("127.0.0.1:%d", port), nil
 	}
 
-	// Docker container — if network tunnel is active AND the destination is
-	// actually reachable, use container IP directly. We probe reachability
-	// because a competing VPN can claim Docker subnets and silently steal
-	// traffic; the dmnc process being up isn't proof packets get there.
+	// Docker container — if network tunnel is healthy AND the destination
+	// is actually reachable, use container IP directly. We gate on
+	// IsHealthy (background tunnel probe) before doing the per-target
+	// IsReachable probe — when the tunnel is known-broken, skipping
+	// straight to published-port lookup saves the 400ms cold-cache hit
+	// per request.
 	var containerIP string
 	var containerIPErr error
+	tunnelUsable := m.networkTunnel != nil && m.networkTunnel.IsRunning() && m.networkTunnel.IsHealthy()
 
-	if m.networkTunnel != nil && m.networkTunnel.IsRunning() && mapping.Port != 0 {
+	if tunnelUsable && mapping.Port != 0 {
 		containerIP, containerIPErr = GetContainerIP(mapping.Target)
 		if containerIPErr == nil && containerIP != "" && m.networkTunnel.IsReachable(containerIP, mapping.Port) {
 			return net.JoinHostPort(containerIP, strconv.Itoa(mapping.Port)), nil
@@ -1359,8 +1406,8 @@ func (m *LLMResolver) buildUpstreamURL(mapping *RouteMapping) (string, error) {
 	// confirmed reachability — otherwise we'd hand Caddy an IP we already
 	// know is unreachable (e.g. VPN-claimed subnet) and the request would
 	// eat a multi-second reverse_proxy dial timeout for nothing.
-	if m.networkTunnel != nil && m.networkTunnel.IsRunning() && mapping.Port != 0 && !m.networkTunnel.IsReachable(containerIP, mapping.Port) {
-		return "", fmt.Errorf("container %s at %s:%d not reachable (no published port and container IP not routable; a VPN may be claiming this Docker subnet)", mapping.Target, containerIP, mapping.Port)
+	if tunnelUsable && mapping.Port != 0 && !m.networkTunnel.IsReachable(containerIP, mapping.Port) {
+		return "", fmt.Errorf("container %s at %s:%d not reachable (no published port and container IP not routable; a VPN may be claiming this Docker subnet, or dmnc tunnel needs restart)", mapping.Target, containerIP, mapping.Port)
 	}
 
 	return net.JoinHostPort(containerIP, strconv.Itoa(mapping.Port)), nil

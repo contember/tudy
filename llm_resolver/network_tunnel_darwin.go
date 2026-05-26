@@ -3,12 +3,14 @@
 package llm_resolver
 
 import (
+	"errors"
 	"net"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -64,6 +66,22 @@ type NetworkTunnel struct {
 	// probe is the function used to test reachability — overridable for tests.
 	// Production callers do not reassign this field after construction.
 	probe func(ip string, port int) bool
+
+	// healthy reports whether dmnc's tunnel was reachable end-to-end on the
+	// most recent health probe. Distinct from running: a dmnc process whose
+	// VM-side WireGuard peer disappeared (typically after Docker Desktop
+	// restart) keeps running but silently black-holes container traffic.
+	// IsHealthy is the routing-time gate; running is just a coarse hint.
+	healthy atomic.Bool
+
+	// stopCh signals the health-probe goroutine to exit. stopOnce keeps
+	// Stop idempotent under repeated calls.
+	stopCh   chan struct{}
+	stopOnce sync.Once
+
+	// healthProbe is overridable for tests. Production callers do not
+	// reassign this field after construction.
+	healthProbe func() bool
 }
 
 type reachabilityEntry struct {
@@ -79,39 +97,104 @@ const (
 	unreachableTTL           = 5 * time.Second
 	reachabilityProbeTimeout = 400 * time.Millisecond
 	reachabilityCacheMax     = 256
+
+	tunnelHealthProbeTimeout  = 500 * time.Millisecond
+	tunnelHealthProbeInterval = 30 * time.Second
 )
+
+// tunnelHealthTarget is dmnc's WireGuard peer endpoint inside Docker
+// Desktop's VM. A healthy tunnel rejects arbitrary ports with
+// ECONNREFUSED (the VM kernel sends RST); a broken tunnel times out
+// because packets reach an absent peer. Port 22 is conventional and
+// not normally bound inside the VM.
+//
+// var instead of const so tests can redirect it to a known-closed port.
+var tunnelHealthTarget = "10.33.33.2:22"
 
 // NewNetworkTunnel creates a NetworkTunnel
 func NewNetworkTunnel(logger *zap.Logger) *NetworkTunnel {
 	return &NetworkTunnel{
-		logger: logger,
-		cache:  make(map[string]reachabilityEntry),
-		gens:   make(map[string]uint64),
-		probe:  probeTCP,
+		logger:      logger,
+		cache:       make(map[string]reachabilityEntry),
+		gens:        make(map[string]uint64),
+		probe:       probeTCP,
+		stopCh:      make(chan struct{}),
+		healthProbe: probeDmncTunnel,
 	}
 }
 
-// Start records whether the dmnc process is running. This is only a
-// hint — actual routing decisions use IsReachable, which probes the
-// destination so we don't get fooled by a VPN claiming Docker subnets.
+// Start records whether the dmnc process is running and, if so, kicks
+// off a periodic health probe against the tunnel's VM-side peer. The
+// process being up is just a hint; routing decisions use IsHealthy plus
+// the per-target IsReachable probe.
 func (nt *NetworkTunnel) Start() error {
 	running := detectDockerMacNetConnect()
 	nt.running.Store(running)
-	if running {
-		nt.logger.Info("docker-mac-net-connect process detected; reachability will be verified per-target")
-	} else {
+	if !running {
 		nt.logger.Debug("docker-mac-net-connect not detected, using published port detection")
+		return nil
 	}
+
+	// Initial probe synchronously so the dashboard reflects state on first load.
+	initial := nt.healthProbe()
+	nt.healthy.Store(initial)
+	if initial {
+		nt.logger.Info("docker-mac-net-connect tunnel is healthy")
+	} else {
+		nt.logger.Warn("docker-mac-net-connect is running but the tunnel is broken; container IPs are unreachable until dmnc is restarted",
+			zap.String("fix", "sudo brew services restart docker-mac-net-connect"),
+		)
+	}
+
+	go nt.healthLoop()
 	return nil
 }
 
-// Stop is a no-op — we don't own the tunnel process
-func (nt *NetworkTunnel) Stop() {}
+// Stop signals the health-probe goroutine to exit. The dmnc process
+// itself is not owned by us.
+func (nt *NetworkTunnel) Stop() {
+	nt.stopOnce.Do(func() { close(nt.stopCh) })
+}
 
 // IsRunning reports whether the dmnc process appeared to be active
-// when Start ran. Best-effort; use IsReachable for routing decisions.
+// when Start ran. Best-effort; use IsHealthy / IsReachable for routing.
 func (nt *NetworkTunnel) IsRunning() bool {
 	return nt.running.Load()
+}
+
+// IsHealthy reports whether the tunnel was reachable end-to-end on the
+// most recent probe. A running-but-unhealthy tunnel happens after Docker
+// Desktop restarts: dmnc keeps running on the host but its WireGuard
+// peer inside the VM is gone, so packets leave but never return.
+func (nt *NetworkTunnel) IsHealthy() bool {
+	return nt.healthy.Load()
+}
+
+// healthLoop reassesses tunnel health periodically and logs state
+// transitions so the breakage is visible the moment it happens — without
+// waiting for a request to fail.
+func (nt *NetworkTunnel) healthLoop() {
+	t := time.NewTicker(tunnelHealthProbeInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-nt.stopCh:
+			return
+		case <-t.C:
+			now := nt.healthProbe()
+			prev := nt.healthy.Swap(now)
+			if now == prev {
+				continue
+			}
+			if now {
+				nt.logger.Info("docker-mac-net-connect tunnel recovered")
+			} else {
+				nt.logger.Warn("docker-mac-net-connect tunnel broken; container IPs are unreachable until dmnc is restarted",
+					zap.String("fix", "sudo brew services restart docker-mac-net-connect"),
+				)
+			}
+		}
+	}
 }
 
 // IsReachable verifies the given (ip, port) is reachable from the host
@@ -283,6 +366,20 @@ func (nt *NetworkTunnel) evictLocked() {
 		delete(nt.cache, oldestKey)
 		delete(nt.gens, oldestKey)
 	}
+}
+
+// probeDmncTunnel tests whether dmnc's WireGuard tunnel is carrying
+// traffic end-to-end. ECONNREFUSED proves the SYN reached the VM kernel
+// and got back a RST; any other failure (timeout, no route) means the
+// tunnel is broken. A successful connect would also count as alive, but
+// the target port is intentionally one the VM doesn't normally serve.
+func probeDmncTunnel() bool {
+	conn, err := net.DialTimeout("tcp", tunnelHealthTarget, tunnelHealthProbeTimeout)
+	if err == nil {
+		_ = conn.Close()
+		return true
+	}
+	return errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // probeTCP attempts a TCP handshake to (ip, port) with a short timeout.

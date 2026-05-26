@@ -25,6 +25,10 @@ func (nt *NetworkTunnel) IsRunning() bool {
 	return false
 }
 
+// IsHealthy is unused on non-macOS — the tunnel branch in
+// buildUpstreamURL is never taken since IsRunning is false.
+func (nt *NetworkTunnel) IsHealthy() bool { return false }
+
 // IsReachable is unused on non-macOS — IsRunning is false, so the
 // tunnel branch in buildUpstreamURL is never taken on Linux/Windows.
 func (nt *NetworkTunnel) IsReachable(ip string, port int) bool {
