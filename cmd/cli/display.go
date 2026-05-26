@@ -216,7 +216,7 @@ func printDockerTunnelStatus(data *statusData) {
 		return // Only relevant when Docker containers are present
 	}
 	if data.DockerTunnel {
-		fmt.Printf("  %s●%s Docker networking %s(direct access via docker-mac-net-connect)%s\n",
+		fmt.Printf("  %s●%s Docker networking %s(docker-mac-net-connect detected; reachability verified per-target)%s\n",
 			colorGreen, colorReset, colorDim, colorReset)
 	} else {
 		fmt.Printf("  %s●%s Docker networking %svia published ports only%s\n",
