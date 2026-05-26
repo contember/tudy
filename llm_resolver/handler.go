@@ -3,9 +3,11 @@ package llm_resolver
 import (
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -282,48 +284,59 @@ func (m *LLMResolver) handleDebug(w http.ResponseWriter, r *http.Request) error 
 	return json.NewEncoder(w).Encode(data)
 }
 
-// handleDebugHTML returns an HTML debug page
-func (m *LLMResolver) handleDebugHTML(w http.ResponseWriter, r *http.Request) error {
-	// Get discovery data for the page
-	processes, _ := DiscoverLocalProcesses()
-	containers, _ := DiscoverDockerContainers(m.ComposeProject)
-	mappings := m.cache.GetAll()
-	logEntries := m.logBuffer.Entries()
+// debugMappingRow is a flattened mapping entry for template rendering
+type debugMappingRow struct {
+	Hostname  string
+	Type      string
+	Target    string
+	Port      int
+	LLMReason string
+	TagClass  string
+	PortEdit  bool
+}
 
-	// Build available targets for inline editing dropdown
-	var availableTargets []map[string]interface{}
-	for _, proc := range processes {
-		label := proc.Command
-		if proc.Workdir != "" {
-			label = proc.Workdir
-		}
-		availableTargets = append(availableTargets, map[string]interface{}{
-			"type":   "process",
-			"target": proc.Workdir,
-			"port":   proc.Port,
-			"label":  fmt.Sprintf(":%d  %s", proc.Port, label),
-		})
-	}
-	for _, container := range containers {
-		port := 0
-		if len(container.Ports) > 0 {
-			port = container.Ports[0]
-		}
-		availableTargets = append(availableTargets, map[string]interface{}{
-			"type":   "docker",
-			"target": container.Name,
-			"port":   port,
-			"label":  fmt.Sprintf("%s (%s)", container.Name, container.Image),
-		})
-	}
-	availableTargetsJSON, _ := json.Marshal(availableTargets)
+// debugLogRow is a flattened log entry for template rendering
+type debugLogRow struct {
+	Time     string
+	Level    string
+	TagClass string
+	Message  string
+	Details  string
+}
 
-	mappingCount := len(mappings)
-	processCount := len(processes)
-	containerCount := len(containers)
-	logCount := len(logEntries)
+// debugProcessRow is a flattened process entry for template rendering
+type debugProcessRow struct {
+	Port    int
+	Command string
+	Workdir string
+}
 
-	html := `<!DOCTYPE html>
+// debugContainerRow is a flattened container entry for template rendering
+type debugContainerRow struct {
+	Name    string
+	Image   string
+	Ports   string
+	IP      string
+	Workdir string
+}
+
+// debugPageData is the data passed to debugTmpl
+type debugPageData struct {
+	Model                string
+	CacheFile            string
+	MappingCount         int
+	ProcessCount         int
+	ContainerCount       int
+	LogCount             int
+	Mappings             []debugMappingRow
+	Processes            []debugProcessRow
+	Containers           []debugContainerRow
+	LogEntries           []debugLogRow
+	AvailableTargetsJSON template.JS
+}
+
+// debugTmpl renders the dashboard HTML with contextual auto-escaping.
+var debugTmpl = template.Must(template.New("debug").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -738,30 +751,30 @@ func (m *LLMResolver) handleDebugHTML(w http.ResponseWriter, r *http.Request) er
     <div class="config-strip">
         <div class="config-pair">
             <span class="config-key">Model</span>
-            <span class="config-val">` + m.Model + `</span>
+            <span class="config-val">{{ .Model }}</span>
         </div>
         <div class="config-sep"></div>
         <div class="config-pair">
             <span class="config-key">Cache</span>
-            <span class="config-val">` + m.CacheFile + `</span>
+            <span class="config-val">{{ .CacheFile }}</span>
         </div>
     </div>
 
     <div class="stats">
         <div class="stat">
-            <div class="stat-num">` + fmt.Sprintf("%d", mappingCount) + `</div>
+            <div class="stat-num">{{ .MappingCount }}</div>
             <div class="stat-label">Routes</div>
         </div>
         <div class="stat">
-            <div class="stat-num">` + fmt.Sprintf("%d", processCount) + `</div>
+            <div class="stat-num">{{ .ProcessCount }}</div>
             <div class="stat-label">Processes</div>
         </div>
         <div class="stat">
-            <div class="stat-num">` + fmt.Sprintf("%d", containerCount) + `</div>
+            <div class="stat-num">{{ .ContainerCount }}</div>
             <div class="stat-label">Containers</div>
         </div>
         <div class="stat">
-            <div class="stat-num">` + fmt.Sprintf("%d", logCount) + `</div>
+            <div class="stat-num">{{ .LogCount }}</div>
             <div class="stat-label">Logs</div>
         </div>
     </div>
@@ -769,192 +782,120 @@ func (m *LLMResolver) handleDebugHTML(w http.ResponseWriter, r *http.Request) er
     <div class="section">
         <div class="section-head">
             <span class="section-title">Route Mappings</span>
-            <span class="section-count">` + fmt.Sprintf("%d", mappingCount) + `</span>
+            <span class="section-count">{{ .MappingCount }}</span>
             <div class="section-line"></div>
         </div>
-        <div class="table-container">`
-
-	if mappingCount == 0 {
-		html += `<div class="empty">No mappings yet. Visit a *.localhost domain to create one.</div>`
-	} else {
-		html += `
+        <div class="table-container">
+{{- if eq .MappingCount 0 }}
+            <div class="empty">No mappings yet. Visit a *.localhost domain to create one.</div>
+{{- else }}
             <table>
                 <thead><tr><th>Hostname</th><th>Type</th><th>Target</th><th>Port</th><th>Reason</th><th></th></tr></thead>
-                <tbody>`
-
-		for hostname, mapping := range mappings {
-			tagClass := "tag-process"
-			if mapping.Type == "docker" {
-				tagClass = "tag-docker"
-			}
-			portEditableClass := ""
-			portOnClick := ""
-			if mapping.Type != "process" {
-				portEditableClass = " cell-editable"
-				portOnClick = `onclick="editPort(this)"`
-			}
-			html += fmt.Sprintf(`
-                <tr data-hostname="%s" data-type="%s" data-target="%s" data-port="%d">
-                    <td class="cell-hostname"><a href="https://%s" target="_blank">%s</a></td>
-                    <td><span class="tag %s">%s</span></td>
-                    <td class="cell-mono cell-editable" onclick="editTarget(this)">%s</td>
-                    <td class="cell-dim`+portEditableClass+`" `+portOnClick+`>%d</td>
-                    <td class="cell-reason" title="%s">%s</td>
-                    <td><button class="btn-del" onclick="deleteMapping('%s')" title="Remove"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg></button></td>
-                </tr>`, hostname, mapping.Type, mapping.Target, mapping.Port, hostname, hostname, tagClass, mapping.Type, mapping.Target, mapping.Port, mapping.LLMReason, mapping.LLMReason, hostname)
-		}
-
-		html += `
+                <tbody>
+{{- range .Mappings }}
+                <tr data-hostname="{{ .Hostname }}" data-type="{{ .Type }}" data-target="{{ .Target }}" data-port="{{ .Port }}">
+                    <td class="cell-hostname"><a href="https://{{ .Hostname }}" target="_blank">{{ .Hostname }}</a></td>
+                    <td><span class="tag {{ .TagClass }}">{{ .Type }}</span></td>
+                    <td class="cell-mono cell-editable" onclick="editTarget(this)">{{ .Target }}</td>
+                    {{- if .PortEdit }}
+                    <td class="cell-dim cell-editable" onclick="editPort(this)">{{ .Port }}</td>
+                    {{- else }}
+                    <td class="cell-dim">{{ .Port }}</td>
+                    {{- end }}
+                    <td class="cell-reason" title="{{ .LLMReason }}">{{ .LLMReason }}</td>
+                    <td><button class="btn-del" data-hostname="{{ .Hostname }}" onclick="deleteMapping(this.dataset.hostname)" title="Remove"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg></button></td>
+                </tr>
+{{- end }}
                 </tbody>
-            </table>`
-	}
-
-	html += `
+            </table>
+{{- end }}
         </div>
     </div>
 
     <div class="section">
         <div class="section-head">
             <span class="section-title">Local Processes</span>
-            <span class="section-count">` + fmt.Sprintf("%d", processCount) + `</span>
+            <span class="section-count">{{ .ProcessCount }}</span>
             <div class="section-line"></div>
         </div>
-        <div class="table-container">`
-
-	if processCount == 0 {
-		html += `<div class="empty">No local processes detected.</div>`
-	} else {
-		html += `
+        <div class="table-container">
+{{- if eq .ProcessCount 0 }}
+            <div class="empty">No local processes detected.</div>
+{{- else }}
             <table>
                 <thead><tr><th>Port</th><th>Command</th><th>Directory</th></tr></thead>
-                <tbody>`
-
-		for _, proc := range processes {
-			cmd := proc.Args
-			if cmd == "" {
-				cmd = proc.Command
-			}
-			if len(cmd) > 100 {
-				cmd = cmd[:100] + "..."
-			}
-			html += fmt.Sprintf(`
+                <tbody>
+{{- range .Processes }}
                 <tr>
-                    <td class="cell-mono">%d</td>
-                    <td class="cell-cmd" title="%s">%s</td>
-                    <td class="cell-dir" title="%s">%s</td>
-                </tr>`, proc.Port, cmd, cmd, proc.Workdir, proc.Workdir)
-		}
-
-		html += `
+                    <td class="cell-mono">{{ .Port }}</td>
+                    <td class="cell-cmd" title="{{ .Command }}">{{ .Command }}</td>
+                    <td class="cell-dir" title="{{ .Workdir }}">{{ .Workdir }}</td>
+                </tr>
+{{- end }}
                 </tbody>
-            </table>`
-	}
-
-	html += `
+            </table>
+{{- end }}
         </div>
     </div>
 
     <div class="section">
         <div class="section-head">
             <span class="section-title">Docker Containers</span>
-            <span class="section-count">` + fmt.Sprintf("%d", containerCount) + `</span>
+            <span class="section-count">{{ .ContainerCount }}</span>
             <div class="section-line"></div>
         </div>
-        <div class="table-container">`
-
-	if containerCount == 0 {
-		html += `<div class="empty">No Docker containers detected.</div>`
-	} else {
-		html += `
+        <div class="table-container">
+{{- if eq .ContainerCount 0 }}
+            <div class="empty">No Docker containers detected.</div>
+{{- else }}
             <table>
                 <thead><tr><th>Name</th><th>Image</th><th>Ports</th><th>IP</th><th>Directory</th></tr></thead>
-                <tbody>`
-
-		for _, container := range containers {
-			ports := ""
-			for i, p := range container.Ports {
-				if i > 0 {
-					ports += ", "
-				}
-				ports += fmt.Sprintf("%d", p)
-			}
-			html += fmt.Sprintf(`
+                <tbody>
+{{- range .Containers }}
                 <tr>
-                    <td class="cell-hostname">%s</td>
-                    <td class="cell-mono">%s</td>
-                    <td class="cell-dim">%s</td>
-                    <td class="cell-mono">%s</td>
-                    <td class="cell-dir" title="%s">%s</td>
-                </tr>`, container.Name, container.Image, ports, container.IP, container.Workdir, container.Workdir)
-		}
-
-		html += `
+                    <td class="cell-hostname">{{ .Name }}</td>
+                    <td class="cell-mono">{{ .Image }}</td>
+                    <td class="cell-dim">{{ .Ports }}</td>
+                    <td class="cell-mono">{{ .IP }}</td>
+                    <td class="cell-dir" title="{{ .Workdir }}">{{ .Workdir }}</td>
+                </tr>
+{{- end }}
                 </tbody>
-            </table>`
-	}
-
-	html += `
+            </table>
+{{- end }}
         </div>
     </div>
 
     <div class="section">
         <div class="section-head">
             <span class="section-title">Recent Logs</span>
-            <span class="section-count">` + fmt.Sprintf("%d", logCount) + `</span>
+            <span class="section-count">{{ .LogCount }}</span>
             <div class="section-line"></div>
         </div>
-        <div class="table-container">`
-
-	if logCount == 0 {
-		html += `<div class="empty">No log entries yet.</div>`
-	} else {
-		html += `
+        <div class="table-container">
+{{- if eq .LogCount 0 }}
+            <div class="empty">No log entries yet.</div>
+{{- else }}
             <table>
                 <thead><tr><th>Time</th><th>Level</th><th>Message</th><th>Details</th></tr></thead>
-                <tbody>`
-
-		// Display in reverse chronological order (newest first)
-		for i := len(logEntries) - 1; i >= 0; i-- {
-			entry := logEntries[i]
-			tagClass := "tag-info"
-			switch entry.Level {
-			case "warn":
-				tagClass = "tag-warn"
-			case "error":
-				tagClass = "tag-error"
-			case "debug":
-				tagClass = "tag-debug"
-			}
-
-			details := ""
-			for k, v := range entry.Fields {
-				if details != "" {
-					details += " "
-				}
-				details += fmt.Sprintf("%s=%v", k, v)
-			}
-
-			html += fmt.Sprintf(`
+                <tbody>
+{{- range .LogEntries }}
                 <tr>
-                    <td class="cell-dim">%s</td>
-                    <td><span class="tag %s">%s</span></td>
-                    <td class="cell-mono">%s</td>
-                    <td class="cell-details" title="%s">%s</td>
-                </tr>`, entry.Time.Format(time.RFC3339), tagClass, entry.Level, entry.Message, details, details)
-		}
-
-		html += `
+                    <td class="cell-dim">{{ .Time }}</td>
+                    <td><span class="tag {{ .TagClass }}">{{ .Level }}</span></td>
+                    <td class="cell-mono">{{ .Message }}</td>
+                    <td class="cell-details" title="{{ .Details }}">{{ .Details }}</td>
+                </tr>
+{{- end }}
                 </tbody>
-            </table>`
-	}
-
-	html += `
+            </table>
+{{- end }}
         </div>
     </div>
 </div>
 
 <script>
-    const availableTargets = ` + string(availableTargetsJSON) + `;
+    const availableTargets = {{ .AvailableTargetsJSON }};
 
     function editTarget(td) {
         if (td.querySelector('select')) return;
@@ -1065,11 +1006,172 @@ func (m *LLMResolver) handleDebugHTML(w http.ResponseWriter, r *http.Request) er
     }
 </script>
 </body>
-</html>`
+</html>`))
+
+// handleDebugHTML returns an HTML debug page
+func (m *LLMResolver) handleDebugHTML(w http.ResponseWriter, r *http.Request) error {
+	// Get discovery data for the page
+	processes, _ := DiscoverLocalProcesses()
+	containers, _ := DiscoverDockerContainers(m.ComposeProject)
+	mappings := m.cache.GetAll()
+	logEntries := m.logBuffer.Entries()
+
+	// Sort processes by port ascending for deterministic display
+	sortedProcesses := make([]LocalProcess, len(processes))
+	copy(sortedProcesses, processes)
+	sort.Slice(sortedProcesses, func(i, j int) bool {
+		return sortedProcesses[i].Port < sortedProcesses[j].Port
+	})
+
+	// Sort containers by name for deterministic display
+	sortedContainers := make([]DockerContainer, len(containers))
+	copy(sortedContainers, containers)
+	sort.Slice(sortedContainers, func(i, j int) bool {
+		return sortedContainers[i].Name < sortedContainers[j].Name
+	})
+
+	// Build available targets for inline editing dropdown
+	var availableTargets []map[string]interface{}
+	for _, proc := range sortedProcesses {
+		label := proc.Command
+		if proc.Workdir != "" {
+			label = proc.Workdir
+		}
+		availableTargets = append(availableTargets, map[string]interface{}{
+			"type":   "process",
+			"target": proc.Workdir,
+			"port":   proc.Port,
+			"label":  fmt.Sprintf(":%d  %s", proc.Port, label),
+		})
+	}
+	for _, container := range sortedContainers {
+		port := 0
+		if len(container.Ports) > 0 {
+			port = container.Ports[0]
+		}
+		availableTargets = append(availableTargets, map[string]interface{}{
+			"type":   "docker",
+			"target": container.Name,
+			"port":   port,
+			"label":  fmt.Sprintf("%s (%s)", container.Name, container.Image),
+		})
+	}
+	// json.Marshal HTML-escapes <, >, & to </>/& by default,
+	// which prevents </script> breakouts when embedded in an inline script.
+	availableTargetsJSON, _ := json.Marshal(availableTargets)
+
+	// Sort mappings by hostname for deterministic display.
+	hostnames := make([]string, 0, len(mappings))
+	for h := range mappings {
+		hostnames = append(hostnames, h)
+	}
+	sort.Strings(hostnames)
+
+	mappingRows := make([]debugMappingRow, 0, len(hostnames))
+	for _, hostname := range hostnames {
+		mapping := mappings[hostname]
+		tagClass := "tag-process"
+		if mapping.Type == "docker" {
+			tagClass = "tag-docker"
+		}
+		mappingRows = append(mappingRows, debugMappingRow{
+			Hostname:  hostname,
+			Type:      mapping.Type,
+			Target:    mapping.Target,
+			Port:      mapping.Port,
+			LLMReason: mapping.LLMReason,
+			TagClass:  tagClass,
+			PortEdit:  mapping.Type != "process",
+		})
+	}
+
+	processRows := make([]debugProcessRow, 0, len(sortedProcesses))
+	for _, proc := range sortedProcesses {
+		cmd := proc.Args
+		if cmd == "" {
+			cmd = proc.Command
+		}
+		if len(cmd) > 100 {
+			cmd = cmd[:100] + "..."
+		}
+		processRows = append(processRows, debugProcessRow{
+			Port:    proc.Port,
+			Command: cmd,
+			Workdir: proc.Workdir,
+		})
+	}
+
+	containerRows := make([]debugContainerRow, 0, len(sortedContainers))
+	for _, container := range sortedContainers {
+		ports := ""
+		for i, p := range container.Ports {
+			if i > 0 {
+				ports += ", "
+			}
+			ports += fmt.Sprintf("%d", p)
+		}
+		containerRows = append(containerRows, debugContainerRow{
+			Name:    container.Name,
+			Image:   container.Image,
+			Ports:   ports,
+			IP:      container.IP,
+			Workdir: container.Workdir,
+		})
+	}
+
+	// Log entries: keep chronological order in the buffer, but emit newest first.
+	logRows := make([]debugLogRow, 0, len(logEntries))
+	for i := len(logEntries) - 1; i >= 0; i-- {
+		entry := logEntries[i]
+		tagClass := "tag-info"
+		switch entry.Level {
+		case "warn":
+			tagClass = "tag-warn"
+		case "error":
+			tagClass = "tag-error"
+		case "debug":
+			tagClass = "tag-debug"
+		}
+
+		// Sort field keys so the rendered details are deterministic.
+		keys := make([]string, 0, len(entry.Fields))
+		for k := range entry.Fields {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		details := ""
+		for _, k := range keys {
+			if details != "" {
+				details += " "
+			}
+			details += fmt.Sprintf("%s=%v", k, entry.Fields[k])
+		}
+
+		logRows = append(logRows, debugLogRow{
+			Time:     entry.Time.Format(time.RFC3339),
+			Level:    entry.Level,
+			TagClass: tagClass,
+			Message:  entry.Message,
+			Details:  details,
+		})
+	}
+
+	data := debugPageData{
+		Model:                m.Model,
+		CacheFile:            m.CacheFile,
+		MappingCount:         len(mappings),
+		ProcessCount:         len(processes),
+		ContainerCount:       len(containers),
+		LogCount:             len(logEntries),
+		Mappings:             mappingRows,
+		Processes:            processRows,
+		Containers:           containerRows,
+		LogEntries:           logRows,
+		AvailableTargetsJSON: template.JS(availableTargetsJSON),
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(html))
-	return nil
+	return debugTmpl.Execute(w, data)
 }
 
 // handleMappingsAPI handles CRUD operations for mappings
