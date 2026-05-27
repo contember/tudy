@@ -128,7 +128,11 @@ This resolves `api` as a related service to `myapp` (e.g., a backend in the same
 
 ### Dashboard
 
-Visit `https://proxy.localhost` to see all current route mappings, discovered processes, and Docker containers. You can delete stale mappings from here.
+Visit `https://proxy.localhost` for a live dashboard split into three pages:
+
+- **Activity** (default) — one row per route with hostname, target, port, a sparkline of request rate over the last 5 minutes, request/error counts, and last-seen time. The row updates live via SSE — no page refresh needed. Click a sparkline to jump to that route's logs. Active and idle routes are grouped; mapped routes can have their target or port edited inline.
+- **Discovery** (`/discovery`) — current local processes (by port + working directory) and running Docker containers (image, ports, IP) that the resolver sees when picking targets.
+- **Logs** (`/logs`) — per-request entries with method, host, path, status pill, and duration; resolver/tunnel events mixed in. A clock-aligned timeline at the top is **drag-selectable**: drag across a range to filter logs to that window. Host links on each row apply a host filter. Active filters appear as chips with independent clear links.
 
 ### Mappings API
 
@@ -152,17 +156,41 @@ curl -sk -X DELETE https://proxy.localhost/_api/mappings/myapp.localhost
 ## CLI
 
 ```
-tudy setup       # Interactive first-time setup (API key, Docker, TLS, start)
+tudy setup       # Interactive first-time setup (provider, API key, Docker, TLS, start)
 tudy status      # Show proxy status with service discovery
 tudy start       # Start the proxy
 tudy stop        # Stop the proxy
 tudy restart     # Restart the proxy
+tudy doctor      # Diagnose configuration, LLM credentials, and proxy health
 tudy trust       # Trust the HTTPS certificate
 tudy update      # Update tudy to the latest version
 tudy uninstall   # Fully remove tudy from the system
 tudy logs        # Tail the proxy log file
 tudy version     # Show tudy version
 ```
+
+#### Setup subcommands
+
+For quick post-install changes that don't need the full wizard:
+
+```
+tudy setup llm-api-url               # provider chooser (URL only)
+tudy setup llm-api-url <url>         # set endpoint directly
+tudy setup llm-model                 # prompt for model id
+tudy setup llm-model <name>          # set model directly
+```
+
+Both restart the running proxy so the change takes effect immediately (Caddy
+only reads `LLM_API_URL` / `MODEL` at startup).
+
+#### tudy doctor
+
+Walks through every layer that has to be right for routing to work:
+config files, the LLM endpoint (with a real `200 OK` ping against your
+key), the launchd service, TLS trust, the dashboard, and Docker
+networking. Exits non-zero if anything fails, so it's scriptable. Use it
+when "I changed providers and routing stopped working" or "everything
+worked yesterday."
 
 All other commands are passed through to the underlying Caddy binary:
 
@@ -197,6 +225,28 @@ Or run `tudy setup` which offers to install it automatically.
 | `LLM_API_URL` | `https://openrouter.ai/api/v1/chat/completions` | OpenAI-compatible chat completions endpoint |
 | `MODEL` | `anthropic/claude-haiku-4.5` | Model to use for routing decisions |
 | `COMPOSE_PROJECT` | | Own Docker Compose project name (filtered from discovery) |
+
+### LLM providers
+
+Tudy speaks the OpenAI chat-completions protocol — `POST <url>` with
+`Authorization: Bearer <key>`, body `{model, messages, response_format}`,
+parsing `choices[0].message.content`. Any endpoint that follows that
+shape works. Examples:
+
+| Provider | `LLM_API_URL` | `MODEL` |
+|---|---|---|
+| OpenRouter (default) | `https://openrouter.ai/api/v1/chat/completions` | `anthropic/claude-haiku-4.5`, `openai/gpt-4.1-mini`, etc. |
+| OpenAI direct | `https://api.openai.com/v1/chat/completions` | `gpt-4o-mini`, `gpt-4.1-mini` |
+| Cloudflare AI Gateway | `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/compat/chat/completions` | depends on routed provider |
+| Self-hosted / Groq / Together / Ollama (OAI bridge) | their `…/v1/chat/completions` | their model id |
+
+Anthropic's native API (`api.anthropic.com/v1/messages`) is **not**
+compatible — its request and response shape differ. Use Anthropic models
+via OpenRouter or Cloudflare AI Gateway instead.
+
+Pick a provider during `tudy setup`, or switch later with
+`tudy setup llm-api-url`. After changing the endpoint, run
+`tudy doctor` to confirm the new key actually works against it.
 
 ### Config Files
 
@@ -247,6 +297,27 @@ Firefox uses its own trust store — import `/tmp/tudy-root-ca.crt` via *Setting
 Fully restart your browser after importing (closing the window is not enough — kill all processes).
 
 The root CA is persisted in the `caddy_data` volume, so it survives container restarts and rebuilds. You only need to do this once.
+
+## Troubleshooting
+
+First step for any "it stopped working" question: run **`tudy doctor`**. It
+verifies the config files, pings the configured LLM endpoint with your
+key, checks proxy / launchd / TLS state, and (on macOS) Docker
+networking. Each failed check comes with a one-line fix hint.
+
+A few common symptoms:
+
+- **Routes that worked yesterday now return 502** — the LLM call is
+  failing. `tudy doctor` will show whether it's an auth error (rotate
+  the key) or rate-limit (`tudy setup llm-model` to a cheaper model).
+- **`ERR_CERT_AUTHORITY_INVALID`** — run `tudy trust`. On Linux, see the
+  manual steps below.
+- **Container routing broken on macOS after a Docker restart** — the
+  dmnc tunnel often dies after Docker upgrades. The dashboard shows a
+  banner; `sudo brew services restart docker-mac-net-connect` fixes it.
+- **Dashboard at `proxy.localhost` shows old data** — the page itself
+  updates live via SSE every second. If it looks stale, the SSE
+  connection dropped (status dot in the header goes dim); reload.
 
 ## How It Works
 
