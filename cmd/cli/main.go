@@ -15,23 +15,22 @@ Usage:
   tudy <command> [args...]
 
 Commands:
-  setup       Interactive first-time setup (API key, certificate, Docker, start)
-  status      Show proxy status
+  setup       Interactive first-time setup (provider, API key, Docker, TLS, start)
+  status      Show proxy status with service discovery
   start       Start the proxy
   stop        Stop the proxy
   restart     Restart the proxy
   doctor      Diagnose configuration, LLM credentials, and proxy health
   trust       Trust the HTTPS certificate
-
-Setup subcommands:
-  setup                              Run the full interactive setup wizard
-  setup llm-api-url [url]            Change the LLM endpoint (provider chooser if no url)
-  setup llm-model [name]             Change the LLM model (prompts if no name)
+  logs        Tail the proxy log file
   update      Update tudy to the latest version
   uninstall   Fully remove tudy from the system
-  logs        Tail the proxy log file
+  caddy       Pass-through to the underlying Caddy binary (run, list-modules, ...)
 
-All other commands (run, version, etc.) are passed through to Caddy.
+Setup subcommands:
+  setup                          Run the full interactive setup wizard
+  setup llm-api-url [url]        Change the LLM endpoint (provider chooser if no url)
+  setup llm-model   [name]       Change the LLM model (prompts if no name)
 `
 
 func main() {
@@ -166,16 +165,30 @@ func main() {
 			}
 		}
 
-	default:
-		// Delegate everything else to the caddy binary
+	case "caddy":
+		// Pass-through to the underlying Caddy binary. The env file is sourced
+		// first so {$LLM_API_KEY} et al. resolve when Caddy reads the Caddyfile.
 		config, err := LoadConfig()
 		if err != nil {
 			printError(fmt.Sprintf("Failed to load configuration: %v", err))
 			os.Exit(1)
 		}
-		if err := delegateToCaddy(config, os.Args[1:]); err != nil {
+		caddyArgs := os.Args[2:]
+		if len(caddyArgs) == 0 {
+			caddyArgs = []string{"help"}
+		}
+		if err := delegateToCaddy(config, caddyArgs); err != nil {
 			printError(fmt.Sprintf("Failed to exec caddy: %v", err))
 			os.Exit(1)
 		}
+
+	default:
+		printError(fmt.Sprintf("Unknown command: %s", command))
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Pass-through to Caddy moved to 'tudy caddy <subcommand>'.")
+		fmt.Fprintf(os.Stderr, "  e.g. tudy caddy %s\n", command)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Run 'tudy help' for the full list of tudy commands.")
+		os.Exit(1)
 	}
 }

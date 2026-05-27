@@ -192,11 +192,14 @@ networking. Exits non-zero if anything fails, so it's scriptable. Use it
 when "I changed providers and routing stopped working" or "everything
 worked yesterday."
 
-All other commands are passed through to the underlying Caddy binary:
+For anything else (raw Caddy commands, debug invocations), use the explicit
+`caddy` pass-through. The env file is sourced first so `{$LLM_API_KEY}` etc.
+resolve when Caddy reads the Caddyfile.
 
 ```bash
-tudy run         # Runs Caddy in foreground (env file sourced automatically)
-tudy list-modules
+tudy caddy run            # Runs Caddy in foreground
+tudy caddy list-modules
+tudy caddy version        # Caddy's version (vs. 'tudy version' for tudy's)
 ```
 
 ## Docker Networking (macOS)
