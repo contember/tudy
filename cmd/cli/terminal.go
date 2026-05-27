@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -61,6 +62,31 @@ func promptString(prompt, defaultValue string) string {
 		return defaultValue
 	}
 	return line
+}
+
+// promptChoice prompts the user to pick one of numbered options. Returns the
+// chosen index (zero-based). Empty input or invalid input falls back to
+// defaultIdx.
+func promptChoice(prompt string, options []string, defaultIdx int) int {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Println()
+	for i, opt := range options {
+		marker := ""
+		if i == defaultIdx {
+			marker = fmt.Sprintf(" %s(default)%s", colorDim, colorReset)
+		}
+		fmt.Printf("    %d) %s%s\n", i+1, opt, marker)
+	}
+	fmt.Printf("  %s [%d]: ", prompt, defaultIdx+1)
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return defaultIdx
+	}
+	if n, err := strconv.Atoi(line); err == nil && n >= 1 && n <= len(options) {
+		return n - 1
+	}
+	return defaultIdx
 }
 
 // promptYesNo prompts the user for a yes/no answer

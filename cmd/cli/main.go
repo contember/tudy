@@ -21,6 +21,11 @@ Commands:
   stop        Stop the proxy
   restart     Restart the proxy
   trust       Trust the HTTPS certificate
+
+Setup subcommands:
+  setup                              Run the full interactive setup wizard
+  setup llm-api-url [url]            Change the LLM endpoint (provider chooser if no url)
+  setup llm-model [name]             Change the LLM model (prompts if no name)
   update      Update tudy to the latest version
   uninstall   Fully remove tudy from the system
   logs        Tail the proxy log file
@@ -51,7 +56,7 @@ func main() {
 			printError(fmt.Sprintf("Failed to load configuration: %v", err))
 			os.Exit(1)
 		}
-		os.Exit(runSetup(config))
+		os.Exit(runSetup(config, os.Args[2:]))
 
 	case "status":
 		config, err := LoadConfig()
