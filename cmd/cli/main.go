@@ -20,6 +20,7 @@ Commands:
   start       Start the proxy
   stop        Stop the proxy
   restart     Restart the proxy
+  doctor      Diagnose configuration, LLM credentials, and proxy health
   trust       Trust the HTTPS certificate
 
 Setup subcommands:
@@ -119,6 +120,14 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("done")
+
+	case "doctor":
+		config, err := LoadConfig()
+		if err != nil {
+			printError(fmt.Sprintf("Failed to load configuration: %v", err))
+			os.Exit(1)
+		}
+		os.Exit(runDoctor(config))
 
 	case "trust":
 		config, err := LoadConfig()
