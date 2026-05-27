@@ -59,6 +59,9 @@ type LLMResolver struct {
 
 	// logBuffer captures recent log entries for the debug dashboard
 	logBuffer *LogBuffer
+
+	// stats tracks per-hostname request counts for the dashboard activity view
+	stats *StatsTracker
 }
 
 // CaddyModule returns the Caddy module information.
@@ -71,7 +74,7 @@ func (LLMResolver) CaddyModule() caddy.ModuleInfo {
 
 // Provision sets up the module.
 func (m *LLMResolver) Provision(ctx caddy.Context) error {
-	m.logBuffer = NewLogBuffer(200)
+	m.logBuffer = NewLogBuffer(500)
 	m.logger = ctx.Logger().WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 		return zapcore.NewTee(c, NewBufferCore(m.logBuffer))
 	}))
@@ -92,6 +95,9 @@ func (m *LLMResolver) Provision(ctx caddy.Context) error {
 
 	// Initialize process cache for dynamic port resolution
 	m.processCache = NewProcessCache()
+
+	// Initialize per-route request stats
+	m.stats = NewStatsTracker()
 
 	// Initialize resolver
 	m.resolver = NewResolver(m.APIKey, m.APIURL, m.Model, m.ComposeProject, m.logger)
