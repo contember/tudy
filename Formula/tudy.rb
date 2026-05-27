@@ -34,7 +34,7 @@ class Tudy < Formula
   end
 
   service do
-    run [opt_bin/"tudy", "run", "--config", etc/"tudy/Caddyfile"]
+    run [opt_bin/"tudy", "caddy", "run", "--config", etc/"tudy/Caddyfile"]
     keep_alive true
     log_path var/"log/tudy.log"
     error_log_path var/"log/tudy.error.log"

@@ -32,6 +32,7 @@ func generatePlist(config *Config) string {
 	<key>ProgramArguments</key>
 	<array>
 		<string>%s</string>
+		<string>caddy</string>
 		<string>run</string>
 		<string>--config</string>
 		<string>%s</string>

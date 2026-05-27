@@ -183,12 +183,19 @@ func main() {
 		}
 
 	default:
-		printError(fmt.Sprintf("Unknown command: %s", command))
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Pass-through to Caddy moved to 'tudy caddy <subcommand>'.")
-		fmt.Fprintf(os.Stderr, "  e.g. tudy caddy %s\n", command)
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Run 'tudy help' for the full list of tudy commands.")
-		os.Exit(1)
+		// Backward-compatible fallback: anything we don't recognize is delegated
+		// to the Caddy binary. The canonical form is 'tudy caddy <cmd>' (since
+		// v0.8.1); keep this silent fallback so older launchd plists / brew
+		// service definitions / third-party scripts using 'tudy run' keep
+		// working without intervention.
+		config, err := LoadConfig()
+		if err != nil {
+			printError(fmt.Sprintf("Failed to load configuration: %v", err))
+			os.Exit(1)
+		}
+		if err := delegateToCaddy(config, os.Args[1:]); err != nil {
+			printError(fmt.Sprintf("Failed to exec caddy: %v", err))
+			os.Exit(1)
+		}
 	}
 }
