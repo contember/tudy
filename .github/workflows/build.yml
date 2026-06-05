@@ -34,7 +34,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          # setup-go@v6 defaults to GOTOOLCHAIN=local (no toolchain
+          # auto-download), so the installed Go must satisfy Caddy's
+          # minimum — track stable instead of pinning a minor.
+          go-version: stable
           cache-dependency-path: llm_resolver/go.sum
 
       - name: Install xcaddy
