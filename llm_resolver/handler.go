@@ -1,7 +1,9 @@
 package llm_resolver
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -58,6 +60,11 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 	// Second-level proxy for inter-service communication
 	if strings.HasPrefix(r.URL.Path, "/_proxy/") {
 		return m.handleSecondLevelProxy(w, r, hostname, next)
+	}
+
+	// Service picker form submission (no-LLM / fallback routing UI)
+	if r.URL.Path == pickerSelectPath {
+		return m.handlePickerSelect(w, r, hostname)
 	}
 
 	// Ignore common browser requests
@@ -117,7 +124,7 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 				return cached, nil
 			}
 
-			resolved, err := m.resolver.ResolveTarget(r.Context(), hostname, userPrompt, m.cache.GetAll())
+			resolved, err := m.resolveTargetChain(r.Context(), hostname, userPrompt, force)
 			if err != nil {
 				return nil, err
 			}
@@ -136,8 +143,7 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 				zap.String("hostname", hostname),
 				zap.Error(err),
 			)
-			http.Error(w, fmt.Sprintf("Failed to resolve target: %v", err), http.StatusBadGateway)
-			return nil
+			return m.serveResolutionFailure(w, r, hostname, err)
 		}
 
 		mapping, _ = result.(*RouteMapping)
@@ -177,6 +183,69 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 	caddyhttp.SetVar(r.Context(), "upstream", upstream)
 
 	return next.ServeHTTP(w, r)
+}
+
+// errNoLLM signals that automatic resolution is exhausted: no unambiguous
+// heuristic match, and no LLM available (not configured, or toggled off)
+// to take over.
+var errNoLLM = errors.New("no LLM available and no unambiguous heuristic match")
+
+// resolveTargetChain resolves a hostname through the full chain:
+// heuristic match first (free, instant), then the LLM when configured.
+//
+// A force refresh (or an explicit user prompt) means the user is overriding
+// a previous answer, so the heuristic is skipped — it would just reproduce
+// the mapping they're trying to replace. With an LLM that falls through to
+// the LLM; without one it falls through to the picker.
+func (m *LLMResolver) resolveTargetChain(ctx context.Context, hostname, userPrompt string, force bool) (*RouteMapping, error) {
+	processes, err := DiscoverLocalProcesses()
+	if err != nil {
+		m.logger.Warn("failed to discover processes", zap.Error(err))
+	}
+	containers, err := DiscoverDockerContainers(m.ComposeProject)
+	if err != nil {
+		m.logger.Warn("failed to discover containers", zap.Error(err))
+	}
+
+	skipHeuristic := force || userPrompt != ""
+	if !skipHeuristic {
+		if mapping := ResolveHeuristically(hostname, processes, containers); mapping != nil {
+			m.logger.Info("resolved heuristically",
+				zap.String("hostname", hostname),
+				zap.String("reason", mapping.LLMReason),
+			)
+			return mapping, nil
+		}
+	}
+
+	if !m.llmAvailable() {
+		return nil, errNoLLM
+	}
+
+	return m.resolver.ResolveTarget(ctx, hostname, userPrompt, processes, containers, m.cache.GetAll())
+}
+
+// serveResolutionFailure answers a request whose hostname could not be
+// resolved: browsers get the interactive service picker, other clients get a
+// plain-text error with discovered services and next steps.
+func (m *LLMResolver) serveResolutionFailure(w http.ResponseWriter, r *http.Request, hostname string, resolveErr error) error {
+	msg := resolveErr.Error()
+	if errors.Is(resolveErr, errNoLLM) {
+		reason := "no LLM is configured"
+		if m.resolver.HasAPIKey() && !m.llmEnabled {
+			reason = "LLM routing is turned off"
+		}
+		msg = fmt.Sprintf("Automatic resolution unavailable: no unambiguous match among discovered services, and %s.", reason)
+	}
+
+	if wantsHTML(r) {
+		return m.renderPickerPage(w, hostname, msg, r.URL.RequestURI())
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusBadGateway)
+	w.Write([]byte(m.pickerSuggestionText(hostname, msg)))
+	return nil
 }
 
 // handleSecondLevelProxy handles /_proxy/serviceName/path requests
@@ -229,14 +298,7 @@ func (m *LLMResolver) handleSecondLevelProxy(w http.ResponseWriter, r *http.Requ
 			// Get origin mapping for context
 			originMapping := m.cache.Get(originHostname)
 
-			resolved, err := m.resolver.ResolveRelatedService(
-				r.Context(),
-				originHostname,
-				originMapping,
-				serviceName,
-				userPrompt,
-				m.cache.GetAll(),
-			)
+			resolved, err := m.resolveRelatedChain(r.Context(), originHostname, originMapping, serviceName, userPrompt, force)
 			if err != nil {
 				return nil, err
 			}
@@ -291,6 +353,48 @@ func (m *LLMResolver) handleSecondLevelProxy(w http.ResponseWriter, r *http.Requ
 	caddyhttp.SetVar(r.Context(), "upstream", upstream)
 
 	return next.ServeHTTP(w, r)
+}
+
+// resolveRelatedChain resolves a related service (second-level proxy):
+// compose-aware heuristic first, then the LLM when configured.
+//
+// Unlike resolveTargetChain, force without an LLM still re-runs the
+// heuristic: /_proxy/ calls are programmatic (fetch, not a browser
+// navigation), so there's no picker to fall through to — a heuristic rerun
+// beats a guaranteed error.
+func (m *LLMResolver) resolveRelatedChain(
+	ctx context.Context,
+	originHostname string,
+	originMapping *RouteMapping,
+	serviceName, userPrompt string,
+	force bool,
+) (*RouteMapping, error) {
+	processes, err := DiscoverLocalProcesses()
+	if err != nil {
+		m.logger.Warn("failed to discover processes", zap.Error(err))
+	}
+	containers, err := DiscoverDockerContainers(m.ComposeProject)
+	if err != nil {
+		m.logger.Warn("failed to discover containers", zap.Error(err))
+	}
+
+	skipHeuristic := (force || userPrompt != "") && m.llmAvailable()
+	if !skipHeuristic {
+		if mapping := ResolveRelatedHeuristically(originMapping, serviceName, processes, containers); mapping != nil {
+			m.logger.Info("resolved related service heuristically",
+				zap.String("origin", originHostname),
+				zap.String("service", serviceName),
+				zap.String("reason", mapping.LLMReason),
+			)
+			return mapping, nil
+		}
+	}
+
+	if !m.llmAvailable() {
+		return nil, errNoLLM
+	}
+
+	return m.resolver.ResolveRelatedService(ctx, originHostname, originMapping, serviceName, userPrompt, processes, containers, m.cache.GetAll())
 }
 
 // handleMappingsAPI handles CRUD operations for mappings

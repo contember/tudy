@@ -1,10 +1,12 @@
 package llm_resolver
 
 import (
+	"crypto/rand"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -32,6 +34,13 @@ type LLMResolver struct {
 
 	// Model is the LLM model to use (default: anthropic/claude-haiku-4.5)
 	Model string `json:"model,omitempty"`
+
+	// LLMEnabled toggles the LLM resolution path without dropping the API
+	// key ("true"/"false"/"on"/"off"/"1"/"0"; default enabled). When off,
+	// resolution uses heuristics + the picker only. Falls back to the
+	// LLM_ENABLED env var when unset (covers Caddyfiles generated before
+	// this directive existed).
+	LLMEnabled string `json:"llm_enabled,omitempty"`
 
 	// CacheFile is the path to store hostname mappings (default: /data/mappings.json)
 	CacheFile string `json:"cache_file,omitempty"`
@@ -62,6 +71,32 @@ type LLMResolver struct {
 
 	// stats tracks per-hostname request counts for the dashboard activity view
 	stats *StatsTracker
+
+	// pickerSecret signs the per-hostname tokens embedded in the service
+	// picker page (see picker.go). Regenerated on every start.
+	pickerSecret []byte
+
+	// llmEnabled is the parsed LLMEnabled value (default true)
+	llmEnabled bool
+}
+
+// llmAvailable reports whether the LLM resolution path can be used:
+// an API key is configured and the path is not toggled off.
+func (m *LLMResolver) llmAvailable() bool {
+	return m.llmEnabled && m.resolver.HasAPIKey()
+}
+
+// parseEnabledFlag parses a human-friendly boolean ("true"/"false", "on"/"off",
+// "1"/"0", "yes"/"no"). ok=false for empty or unrecognized input.
+func parseEnabledFlag(s string) (value, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true", "on", "1", "yes":
+		return true, true
+	case "false", "off", "0", "no":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // CaddyModule returns the Caddy module information.
@@ -102,6 +137,25 @@ func (m *LLMResolver) Provision(ctx caddy.Context) error {
 	// Initialize resolver
 	m.resolver = NewResolver(m.APIKey, m.APIURL, m.Model, m.ComposeProject, m.logger)
 
+	// Parse the LLM on/off toggle (directive value, then env var, then on)
+	rawEnabled := m.LLMEnabled
+	if rawEnabled == "" {
+		rawEnabled = os.Getenv("LLM_ENABLED")
+	}
+	m.llmEnabled = true
+	if v, ok := parseEnabledFlag(rawEnabled); ok {
+		m.llmEnabled = v
+	} else if rawEnabled != "" {
+		m.logger.Warn("unrecognized llm_enabled value, defaulting to enabled",
+			zap.String("value", rawEnabled))
+	}
+
+	// Secret for picker form tokens (no-LLM / fallback routing UI)
+	m.pickerSecret = make([]byte, 32)
+	if _, err := rand.Read(m.pickerSecret); err != nil {
+		return fmt.Errorf("failed to generate picker secret: %v", err)
+	}
+
 	// Initialize network tunnel for Docker VM access on macOS
 	m.networkTunnel = NewNetworkTunnel(m.logger)
 	if err := m.networkTunnel.Start(); err != nil {
@@ -112,7 +166,14 @@ func (m *LLMResolver) Provision(ctx caddy.Context) error {
 	m.logger.Info("LLM resolver provisioned",
 		zap.String("model", m.Model),
 		zap.String("cache_file", m.CacheFile),
+		zap.Bool("llm_available", m.llmAvailable()),
 	)
+	switch {
+	case !m.resolver.HasAPIKey():
+		m.logger.Info("no LLM API key configured — running in heuristic + picker mode")
+	case !m.llmEnabled:
+		m.logger.Info("LLM routing toggled off — running in heuristic + picker mode")
+	}
 
 	return nil
 }
@@ -159,10 +220,11 @@ func (m *LLMResolver) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		for d.NextBlock(0) {
 			switch d.Val() {
 			case "api_key":
-				if !d.NextArg() {
-					return d.ArgErr()
+				// Optional: `api_key {$LLM_API_KEY}` expands to no argument
+				// when the env var is unset, which means no-LLM mode.
+				if d.NextArg() {
+					m.APIKey = d.Val()
 				}
-				m.APIKey = d.Val()
 			case "api_url":
 				if !d.NextArg() {
 					return d.ArgErr()
@@ -173,6 +235,12 @@ func (m *LLMResolver) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				m.Model = d.Val()
+			case "llm_enabled":
+				// Optional: `llm_enabled {$LLM_ENABLED:}` expands to no
+				// argument when the env var is unset (default: enabled).
+				if d.NextArg() {
+					m.LLMEnabled = d.Val()
+				}
 			case "cache_file":
 				if !d.NextArg() {
 					return d.ArgErr()

@@ -48,6 +48,12 @@ func NewResolver(apiKey, apiURL, model, composeProject string, logger *zap.Logge
 	}
 }
 
+// HasAPIKey reports whether the resolver is configured with an API key
+// (i.e. LLM-based resolution is available at all).
+func (r *Resolver) HasAPIKey() bool {
+	return r.apiKey != ""
+}
+
 // LLMResponse represents the expected response from the LLM
 type LLMResponse struct {
 	Type           string `json:"type"`
@@ -59,23 +65,20 @@ type LLMResponse struct {
 }
 
 // ResolveTarget resolves a hostname to a target using the LLM.
+// The caller supplies the discovered processes/containers (discovery happens
+// once per resolution, shared with the heuristic pass).
 // The provided context is plumbed down to the outbound LLM HTTP call so that
 // cancellation of the inbound request (e.g. client disconnect) aborts the
 // outbound request instead of waiting out the full client timeout.
-func (r *Resolver) ResolveTarget(ctx context.Context, hostname, userPrompt string, existingMappings Mappings) (*RouteMapping, error) {
+func (r *Resolver) ResolveTarget(
+	ctx context.Context,
+	hostname, userPrompt string,
+	processes []LocalProcess,
+	containers []DockerContainer,
+	existingMappings Mappings,
+) (*RouteMapping, error) {
 	if r.apiKey == "" {
 		return nil, fmt.Errorf("API key is not set")
-	}
-
-	// Gather context
-	processes, err := DiscoverLocalProcesses()
-	if err != nil {
-		r.logger.Warn("failed to discover processes", zap.Error(err))
-	}
-
-	containers, err := DiscoverDockerContainers(r.composeProject)
-	if err != nil {
-		r.logger.Warn("failed to discover containers", zap.Error(err))
 	}
 
 	prompt := r.buildPrompt(hostname, processes, containers, existingMappings, userPrompt)
@@ -115,21 +118,12 @@ func (r *Resolver) ResolveRelatedService(
 	originMapping *RouteMapping,
 	serviceName string,
 	userPrompt string,
+	processes []LocalProcess,
+	containers []DockerContainer,
 	existingMappings Mappings,
 ) (*RouteMapping, error) {
 	if r.apiKey == "" {
 		return nil, fmt.Errorf("API key is not set")
-	}
-
-	// Gather context
-	processes, err := DiscoverLocalProcesses()
-	if err != nil {
-		r.logger.Warn("failed to discover processes", zap.Error(err))
-	}
-
-	containers, err := DiscoverDockerContainers(r.composeProject)
-	if err != nil {
-		r.logger.Warn("failed to discover containers", zap.Error(err))
 	}
 
 	prompt := r.buildRelatedServicePrompt(originHostname, originMapping, serviceName, processes, containers, existingMappings, userPrompt)

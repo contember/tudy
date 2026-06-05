@@ -42,6 +42,7 @@
 		api_key {$LLM_API_KEY}
 		api_url {$LLM_API_URL:https://openrouter.ai/api/v1/chat/completions}
 		model {$MODEL:anthropic/claude-haiku-4.5}
+		llm_enabled {$LLM_ENABLED:true}
 		cache_file {$CADDY_DATA_DIR:/var/lib/caddy}/mappings.json
 		compose_project {$COMPOSE_PROJECT:}
 	}
