@@ -26,6 +26,8 @@ llm_resolver/                    # Caddy module (Go package)
 ├── module.go                    # Caddy module registration
 ├── handler.go                   # HTTP middleware handler
 ├── resolver.go                  # LLM resolution logic
+├── heuristic.go                 # Deterministic (no-LLM) hostname matching
+├── picker.go                    # Service picker page for unresolved hostnames
 ├── cache.go                     # Persistent mapping storage
 ├── discovery.go                 # Re-exports discovery functions
 ├── port_resolver.go             # Dynamic port resolution
@@ -59,7 +61,8 @@ cmd/cli/                         # CLI binary (tudy command)
 
 ## Environment Variables
 
-- `LLM_API_KEY` - Required API key for the LLM API
+- `LLM_API_KEY` - Optional API key for the LLM API; unset = no-LLM mode (heuristic matching + browser picker)
+- `LLM_ENABLED` - Toggle the LLM path without removing the key (default: `true`; `tudy llm on|off`)
 - `LLM_API_URL` - LLM API URL (default: `https://openrouter.ai/api/v1/chat/completions`)
 - `MODEL` - LLM model (default: `anthropic/claude-haiku-4.5`)
 - `COMPOSE_PROJECT` - Own compose project name to filter out

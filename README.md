@@ -2,11 +2,12 @@
 
 A local development proxy that uses AI to automatically route `*.localhost` domains to your running services. No config files, no port numbers to remember -- just visit `myapp.localhost` and the proxy figures out the rest.
 
-Supports any OpenAI-compatible API (OpenRouter, Ollama, LM Studio, vLLM, etc.).
+Supports any OpenAI-compatible API (OpenRouter, Ollama, LM Studio, vLLM, etc.). The LLM is optional — without one, tudy matches hostnames to services heuristically and shows an interactive service picker in the browser for anything it can't match.
 
 ## Features
 
-- **Dynamic hostname resolution** using any OpenAI-compatible LLM API
+- **Dynamic hostname resolution**: exact heuristic matching first (project directory, container name, compose service), then any OpenAI-compatible LLM API for fuzzy cases
+- **Works without an LLM**: unresolved hostnames serve a one-click service picker in the browser
 - **Automatic service discovery**:
   - Local processes with open ports (Linux: `ss`/`/proc`, macOS: `lsof`)
   - Docker containers (via Docker API), including listening port detection
@@ -31,7 +32,7 @@ tudy setup
 
 The `setup` command walks you through configuring your API key, Docker networking, trusting the HTTPS certificate, and starting the proxy.
 
-You'll need an [OpenRouter](https://openrouter.ai/) API key (or any OpenAI-compatible API).
+An [OpenRouter](https://openrouter.ai/) API key (or any OpenAI-compatible API) is optional — it enables LLM-based routing for hostnames the heuristics can't match unambiguously. Pick "Skip — run without LLM" in the wizard to go without one.
 
 ### Linux (Docker)
 
@@ -178,6 +179,8 @@ tudy setup llm-api-url               # provider chooser (URL only)
 tudy setup llm-api-url <url>         # set endpoint directly
 tudy setup llm-model                 # prompt for model id
 tudy setup llm-model <name>          # set model directly
+tudy llm                             # show whether LLM routing is on
+tudy llm on|off                      # toggle the LLM path (API key is kept)
 ```
 
 Both restart the running proxy so the change takes effect immediately (Caddy
@@ -224,7 +227,8 @@ Or run `tudy setup` which offers to install it automatically.
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_API_KEY` | *(required)* | API key for the LLM provider |
+| `LLM_API_KEY` | *(optional)* | API key for the LLM provider; unset = no-LLM mode (heuristic matching + browser picker) |
+| `LLM_ENABLED` | `true` | Toggle the LLM path without removing the key (`tudy llm on\|off`); off = heuristic + picker only |
 | `LLM_API_URL` | `https://openrouter.ai/api/v1/chat/completions` | OpenAI-compatible chat completions endpoint |
 | `MODEL` | `anthropic/claude-haiku-4.5` | Model to use for routing decisions |
 | `COMPOSE_PROJECT` | | Own Docker Compose project name (filtered from discovery) |
@@ -329,10 +333,11 @@ A few common symptoms:
 3. If not cached, it:
    - Discovers local processes with open ports
    - Discovers running Docker containers (including listening ports via `/proc/net/tcp`)
-   - Calls the LLM with hostname + service list
-   - LLM returns the best matching target
+   - Tries an exact heuristic match (project directory name, container name, compose project/service) — used only when exactly one candidate matches
+   - Otherwise calls the LLM (if configured) with hostname + service list
    - Result is cached
 4. Request is proxied to the resolved target
+5. If nothing resolves (no LLM key, LLM error, or ambiguous match), browser requests get an interactive picker page listing all discovered services — one click creates the mapping; non-browser clients get a plain-text 502 with the discovered services
 
 ## Development
 
