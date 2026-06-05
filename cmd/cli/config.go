@@ -190,6 +190,7 @@ func generateCaddyfile(dataDir string) string {
 
 	llm_resolver {
 		api_key {$LLM_API_KEY}
+		llm_enabled {$LLM_ENABLED:true}
 		cache_file %s/mappings.json
 	}
 

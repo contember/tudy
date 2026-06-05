@@ -181,12 +181,24 @@ func runSetupWizard(config *Config) int {
 // configureProvider walks the user through picking an LLM provider preset
 // (or entering a custom OpenAI-compatible endpoint), then prompts for the
 // matching API key and writes both to the env file.
+//
+// The LLM is optional: the last choice skips it entirely. Without a key the
+// proxy resolves hostnames heuristically and serves an interactive service
+// picker on unresolved hostnames.
 func configureProvider(config *Config) bool {
-	names := make([]string, len(llmProviders))
-	for i, p := range llmProviders {
-		names[i] = p.Name
+	names := make([]string, 0, len(llmProviders)+1)
+	for _, p := range llmProviders {
+		names = append(names, p.Name)
 	}
+	names = append(names, "Skip — run without LLM")
 	idx := promptChoice("Pick a provider", names, 0)
+	if idx == len(llmProviders) {
+		printOK("Running without LLM")
+		printDim("  Hostnames are matched heuristically against running services;")
+		printDim("  unresolved hostnames show a service picker in the browser.")
+		printDim("  Enable LLM routing later with: tudy setup")
+		return true
+	}
 	p := llmProviders[idx]
 
 	url := p.URL

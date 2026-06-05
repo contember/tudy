@@ -163,12 +163,21 @@ func llmChecks(config *Config) []check {
 	out := []check{
 		{checkPass, "Endpoint", displayURL, ""},
 	}
-	if key == "" {
+	switch {
+	case key == "":
+		// Not a failure: tudy runs without an LLM (heuristic matching +
+		// browser picker on unresolved hostnames).
 		out = append(out,
-			check{checkFail, "API key", "not set", "Run: tudy setup"},
+			check{checkWarn, "API key", "not set — no-LLM mode (heuristic + picker routing)", "Optional: run 'tudy setup' to enable LLM resolution"},
 			check{checkSkip, "Ping endpoint", "skipped (no key)", ""},
 		)
-	} else {
+	case !llmRoutingEnabled(config):
+		out = append(out,
+			check{checkPass, "API key", shared.MaskAPIKey(key), ""},
+			check{checkWarn, "LLM routing", "off (heuristic + picker routing)", "Re-enable with: tudy llm on"},
+			check{checkSkip, "Ping endpoint", "skipped (LLM routing off)", ""},
+		)
+	default:
 		out = append(out,
 			check{checkPass, "API key", shared.MaskAPIKey(key), ""},
 			pingLLM(url, key, model),

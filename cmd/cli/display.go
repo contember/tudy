@@ -231,10 +231,12 @@ func printStopped(config *Config) {
 	fmt.Printf("  Config:    %s\n", config.ConfigDir)
 	fmt.Printf("  Dashboard: %s\n", config.DashboardURL)
 
-	if key := config.GetAPIKey(); key != "" {
-		fmt.Printf("  API Key:   %s\n", shared.MaskAPIKey(key))
+	if key := config.GetAPIKey(); key == "" {
+		fmt.Printf("  API Key:   %snot set — no-LLM mode (heuristic + picker routing)%s\n", colorYellow, colorReset)
+	} else if !llmRoutingEnabled(config) {
+		fmt.Printf("  API Key:   %s %s(LLM routing off — tudy llm on)%s\n", shared.MaskAPIKey(key), colorYellow, colorReset)
 	} else {
-		fmt.Printf("  API Key:   %s(not configured)%s\n", colorRed, colorReset)
+		fmt.Printf("  API Key:   %s\n", shared.MaskAPIKey(key))
 	}
 
 	fmt.Println()

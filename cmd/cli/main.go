@@ -20,6 +20,7 @@ Commands:
   start       Start the proxy
   stop        Stop the proxy
   restart     Restart the proxy
+  llm         Toggle LLM routing on/off (off = heuristics + browser picker)
   doctor      Diagnose configuration, LLM credentials, and proxy health
   trust       Trust the HTTPS certificate
   logs        Tail the proxy log file
@@ -31,6 +32,10 @@ Setup subcommands:
   setup                          Run the full interactive setup wizard
   setup llm-api-url [url]        Change the LLM endpoint (provider chooser if no url)
   setup llm-model   [name]       Change the LLM model (prompts if no name)
+
+LLM subcommands:
+  llm                            Show whether LLM routing is on
+  llm on|off                     Toggle the LLM path (API key is kept either way)
 `
 
 func main() {
@@ -119,6 +124,14 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("done")
+
+	case "llm":
+		config, err := LoadConfig()
+		if err != nil {
+			printError(fmt.Sprintf("Failed to load configuration: %v", err))
+			os.Exit(1)
+		}
+		os.Exit(runLLM(config, os.Args[2:]))
 
 	case "doctor":
 		config, err := LoadConfig()
