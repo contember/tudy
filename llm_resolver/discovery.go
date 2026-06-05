@@ -7,6 +7,7 @@ import (
 // Re-export types from discovery package
 type LocalProcess = discovery.LocalProcess
 type DockerContainer = discovery.DockerContainer
+type PortMapping = discovery.PortMapping
 
 // DiscoverLocalProcesses discovers locally running processes with open ports
 func DiscoverLocalProcesses() ([]LocalProcess, error) {
