@@ -17,6 +17,23 @@ var compiledPatterns sync.Map
 // substring matching immediately.
 var invalidPatternSentinel = struct{}{}
 
+// Workdir match ranks, most specific first.
+const (
+	rankExact       = iota
+	rankUnderTarget // process runs in a subdirectory of the mapped workdir
+	rankAboveTarget // process runs in a parent of the mapped workdir
+)
+
+// maxParentDistance caps how far above the mapped workdir a process may run.
+// Without it, a shell or agent parked in a high-level directory claims every mapping.
+const maxParentDistance = 2
+
+// workdirMatch describes how specifically a process workdir matches the target.
+type workdirMatch struct {
+	rank     int
+	distance int // path segments between the two directories
+}
+
 // ResolveProcessPort finds the current port for a process identified by ProcessIdentifier.
 // It uses the ProcessCache to get current processes and matches against the identifier.
 func ResolveProcessPort(identifier *ProcessIdentifier, cache *ProcessCache) (int, error) {
@@ -29,11 +46,12 @@ func ResolveProcessPort(identifier *ProcessIdentifier, cache *ProcessCache) (int
 		return 0, fmt.Errorf("failed to get processes: %w", err)
 	}
 
-	var candidates []LocalProcess
+	var best *LocalProcess
+	var bestMatch workdirMatch
 
-	// Filter by workdir (prefix match)
-	for _, proc := range processes {
-		if !matchesWorkdir(proc.Workdir, identifier.Workdir) {
+	for i, proc := range processes {
+		match, ok := matchWorkdir(proc.Workdir, identifier.Workdir)
+		if !ok {
 			continue
 		}
 
@@ -44,52 +62,73 @@ func ResolveProcessPort(identifier *ProcessIdentifier, cache *ProcessCache) (int
 			}
 		}
 
-		candidates = append(candidates, proc)
-	}
-
-	if len(candidates) == 0 {
-		return 0, fmt.Errorf("no process found matching workdir %q", identifier.Workdir)
-	}
-
-	// If multiple candidates, prefer the one with the lowest port
-	// (common pattern: Vite uses lower ports for main dev server)
-	best := candidates[0]
-	for _, c := range candidates[1:] {
-		if c.Port < best.Port {
-			best = c
+		if best == nil || betterMatch(match, proc.Port, bestMatch, best.Port) {
+			best = &processes[i]
+			bestMatch = match
 		}
+	}
+
+	if best == nil {
+		return 0, fmt.Errorf("no process found matching workdir %q", identifier.Workdir)
 	}
 
 	return best.Port, nil
 }
 
-// matchesWorkdir checks if a process workdir matches the target workdir.
-// Uses prefix matching so /home/user/project matches /home/user/project/frontend
-func matchesWorkdir(processWorkdir, targetWorkdir string) bool {
-	if processWorkdir == "" || targetWorkdir == "" {
-		return false
+// betterMatch reports whether candidate a beats b: closer workdir first, and
+// only between equally close candidates the lowest port (Vite-style main server).
+func betterMatch(a workdirMatch, aPort int, b workdirMatch, bPort int) bool {
+	if a.rank != b.rank {
+		return a.rank < b.rank
 	}
+	if a.distance != b.distance {
+		return a.distance < b.distance
+	}
+	return aPort < bPort
+}
 
-	// Normalize paths (remove trailing slashes)
+// matchWorkdir reports how a process workdir relates to the mapped workdir.
+// Parent-direction matches are deliberately restricted: an unrestricted one lets
+// any process running in a home directory hijack every process mapping.
+func matchWorkdir(processWorkdir, targetWorkdir string) (workdirMatch, bool) {
 	processWorkdir = strings.TrimSuffix(processWorkdir, "/")
 	targetWorkdir = strings.TrimSuffix(targetWorkdir, "/")
 
-	// Exact match
+	if processWorkdir == "" || targetWorkdir == "" {
+		return workdirMatch{}, false
+	}
+
 	if processWorkdir == targetWorkdir {
-		return true
+		return workdirMatch{rank: rankExact}, true
 	}
 
-	// Process workdir is under target workdir (target is parent)
-	if strings.HasPrefix(processWorkdir, targetWorkdir+"/") {
-		return true
+	if rest := strings.TrimPrefix(processWorkdir, targetWorkdir+"/"); rest != processWorkdir {
+		return workdirMatch{rank: rankUnderTarget, distance: segmentCount(rest)}, true
 	}
 
-	// Target workdir is under process workdir (process is parent)
-	if strings.HasPrefix(targetWorkdir, processWorkdir+"/") {
-		return true
+	if rest := strings.TrimPrefix(targetWorkdir, processWorkdir+"/"); rest != targetWorkdir {
+		distance := segmentCount(rest)
+		if distance > maxParentDistance || isUserHome(processWorkdir) {
+			return workdirMatch{}, false
+		}
+		return workdirMatch{rank: rankAboveTarget, distance: distance}, true
 	}
 
-	return false
+	return workdirMatch{}, false
+}
+
+// isUserHome reports whether dir is a user home directory (/home/x, /Users/x, /root).
+func isUserHome(dir string) bool {
+	if dir == "/root" {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(dir, "/"), "/")
+	return len(parts) == 2 && (parts[0] == "home" || parts[0] == "Users")
+}
+
+// segmentCount counts the path segments of a relative path.
+func segmentCount(relPath string) int {
+	return strings.Count(relPath, "/") + 1
 }
 
 // matchesCommand checks if a process matches the command pattern regex.
