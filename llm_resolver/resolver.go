@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,6 +55,56 @@ func (r *Resolver) HasAPIKey() bool {
 	return r.apiKey != ""
 }
 
+// ErrNoConfidentMatch is returned when the model declines to map a hostname
+// because nothing discovered plausibly serves it. The caller falls through to
+// the service picker, and no mapping is cached. This exists because the
+// alternative, instructing the model to always produce a best guess, silently
+// routed hostnames to unrelated services, and those guesses were then fed back
+// as "existing mappings" precedent, so a single wrong answer propagated.
+var ErrNoConfidentMatch = errors.New("no confident match for hostname")
+
+// declineError carries the model's own explanation for a decline, so the
+// picker page can show why nothing matched. It unwraps to ErrNoConfidentMatch.
+type declineError struct {
+	reason string
+}
+
+func (e *declineError) Error() string {
+	if e.reason == "" {
+		return ErrNoConfidentMatch.Error()
+	}
+	return ErrNoConfidentMatch.Error() + ": " + e.reason
+}
+
+func (e *declineError) Unwrap() error { return ErrNoConfidentMatch }
+
+// declineReason returns the model's explanation for a decline, or "" when the
+// error is not a decline or carried no reason.
+func declineReason(err error) string {
+	var d *declineError
+	if errors.As(err, &d) {
+		return d.reason
+	}
+	return ""
+}
+
+// declined reports whether the model answered "nothing here serves this".
+// A missing target or port is treated the same way: a mapping without one is
+// not routable, and caching it would just produce a 502 under a hostname that
+// looks configured.
+//
+// This has to run inside callLLM, ahead of validateLLMResponse. A decline is a
+// valid answer that happens to fail schema validation (type "none" is not
+// routable), so classifying it after the call never fires: the validator
+// rejects it first and the caller sees a parse error instead.
+func declined(response *LLMResponse) bool {
+	switch strings.ToLower(strings.TrimSpace(response.Type)) {
+	case "none", "unknown", "":
+		return true
+	}
+	return response.Target == "" || response.Port <= 0
+}
+
 // LLMResponse represents the expected response from the LLM
 type LLMResponse struct {
 	Type           string `json:"type"`
@@ -84,6 +135,8 @@ func (r *Resolver) ResolveTarget(
 	prompt := r.buildPrompt(hostname, processes, containers, existingMappings, userPrompt)
 	systemPrompt := r.getSystemPrompt()
 
+	// callLLM turns a decline into ErrNoConfidentMatch, so anything returned
+	// here is a validated, routable answer.
 	response, err := r.callLLM(ctx, systemPrompt, prompt)
 	if err != nil {
 		return nil, err
@@ -129,6 +182,8 @@ func (r *Resolver) ResolveRelatedService(
 	prompt := r.buildRelatedServicePrompt(originHostname, originMapping, serviceName, processes, containers, existingMappings, userPrompt)
 	systemPrompt := r.getRelatedServiceSystemPrompt()
 
+	// callLLM turns a decline into ErrNoConfidentMatch, so anything returned
+	// here is a validated, routable answer.
 	response, err := r.callLLM(ctx, systemPrompt, prompt)
 	if err != nil {
 		return nil, err
@@ -179,7 +234,14 @@ Respond with a JSON object:
 
 IMPORTANT: For type="process", you MUST include the "workdir" field with the full working directory path of the matched process. This is used for dynamic port resolution when the process restarts on a different port.
 
-If no suitable target is found, still provide your best guess with explanation.`
+If nothing among the discovered processes and containers plausibly serves this
+hostname, answer with {"type": "none", "reason": "..."} instead. Do NOT guess.
+A wrong mapping is worse than no mapping: it is cached and silently serves an
+unrelated service under this hostname, and it is fed back to you as an
+"existing mapping" precedent, so one guess compounds into more. "none" costs
+the user one click on the service picker; a guess costs them a debugging
+session. In particular, do not route a hostname to some other service merely
+because they share a project prefix.`
 }
 
 func (r *Resolver) getRelatedServiceSystemPrompt() string {
@@ -209,7 +271,9 @@ Respond with a JSON object:
 
 IMPORTANT: For type="process", you MUST include the "workdir" field with the full working directory path of the matched process. This is used for dynamic port resolution when the process restarts on a different port.
 
-If no suitable target is found, still provide your best guess with explanation.`
+If no service in the origin's project plausibly matches, answer with
+{"type": "none", "reason": "..."} instead of guessing. The caller falls back to
+the service picker, which is cheaper for the user than a wrong route.`
 }
 
 func (r *Resolver) buildPrompt(
@@ -421,6 +485,13 @@ func (r *Resolver) callLLM(ctx context.Context, systemPrompt, userPrompt string)
 	var llmResponse LLMResponse
 	if err := json.Unmarshal([]byte(content), &llmResponse); err != nil {
 		return nil, fmt.Errorf("failed to parse LLM response: %s - %w", content, err)
+	}
+
+	// A decline is a valid answer, not a malformed one. It has to be
+	// classified before validateLLMResponse, which only knows how to describe
+	// routable mappings and would reject it as a schema error.
+	if declined(&llmResponse) {
+		return nil, &declineError{reason: strings.TrimSpace(llmResponse.Reason)}
 	}
 
 	// Validate response
