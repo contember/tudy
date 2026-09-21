@@ -219,6 +219,7 @@ func (m *LLMResolver) handlePickerSelect(w http.ResponseWriter, r *http.Request,
 		mapping.ProcessIdentifier = &ProcessIdentifier{Workdir: workdir}
 	}
 
+	m.declines.Delete(hostname)
 	m.cache.Set(hostname, mapping)
 	if err := m.cache.Save(); err != nil {
 		http.Error(w, "Failed to save mapping", http.StatusInternalServerError)

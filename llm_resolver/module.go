@@ -54,6 +54,11 @@ type LLMResolver struct {
 	// cache is the mapping cache
 	cache *Cache
 
+	// declines remembers hostnames the model recently declined to map, so a
+	// client retrying an unresolvable hostname does not bill an LLM call per
+	// request
+	declines *DeclineCache
+
 	// processCache is short-lived cache for process discovery
 	processCache *ProcessCache
 
@@ -127,6 +132,9 @@ func (m *LLMResolver) Provision(ctx caddy.Context) error {
 	if err := m.cache.Load(); err != nil {
 		m.logger.Warn("failed to load cache, starting fresh", zap.Error(err))
 	}
+
+	// Remember recent declines so retries on an unresolvable hostname are free
+	m.declines = NewDeclineCache()
 
 	// Initialize process cache for dynamic port resolution
 	m.processCache = NewProcessCache()
