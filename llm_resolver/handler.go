@@ -105,6 +105,25 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 		mapping = m.cache.Get(hostname)
 	}
 
+	// A hostname the model recently declined stays declined for a short while.
+	// Clients retry unresolvable hostnames (a reload loop, a polling script),
+	// and asking again on every one of those is a paid call per request for an
+	// answer that is not going to change that fast. The picker is served from
+	// the remembered decline, with discovery re-run, so a service started in
+	// the meantime still shows up to pick.
+	//
+	// An explicit ?prompt= bypasses this: it asks a different question than
+	// the one that was declined, and right after a decline is exactly when a
+	// user reaches for it.
+	if mapping == nil && !force && userPrompt == "" {
+		if recent := m.declines.Get(hostname); recent != nil {
+			m.logger.Debug("recent decline; serving the picker without asking again",
+				zap.String("hostname", hostname),
+			)
+			return m.serveResolutionFailure(w, r, hostname, recent)
+		}
+	}
+
 	if mapping == nil {
 		m.logger.Info("resolving target",
 			zap.String("hostname", hostname),
@@ -126,10 +145,17 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 
 			resolved, err := m.resolveTargetChain(r.Context(), hostname, userPrompt, force)
 			if err != nil {
+				// A decline to a prompted question is not remembered: it says
+				// nothing about the bare hostname, and remembering it would
+				// keep the heuristic from running on the next plain request.
+				if errors.Is(err, ErrNoConfidentMatch) && userPrompt == "" {
+					m.declines.Set(hostname, err)
+				}
 				return nil, err
 			}
 
 			// Cache the result
+			m.declines.Delete(hostname)
 			m.cache.Set(hostname, resolved)
 			if err := m.cache.Save(); err != nil {
 				m.logger.Warn("failed to save cache", zap.Error(err))
@@ -139,10 +165,19 @@ func (m *LLMResolver) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 		})
 
 		if err != nil {
-			m.logger.Error("failed to resolve target",
-				zap.String("hostname", hostname),
-				zap.Error(err),
-			)
+			// A decline is an expected outcome, not a failure: the model was
+			// asked not to guess, so this is the picker doing its job.
+			if errors.Is(err, ErrNoConfidentMatch) {
+				m.logger.Info("no confident match; falling through to the picker",
+					zap.String("hostname", hostname),
+					zap.Error(err),
+				)
+			} else {
+				m.logger.Error("failed to resolve target",
+					zap.String("hostname", hostname),
+					zap.Error(err),
+				)
+			}
 			return m.serveResolutionFailure(w, r, hostname, err)
 		}
 
@@ -230,6 +265,17 @@ func (m *LLMResolver) resolveTargetChain(ctx context.Context, hostname, userProm
 // plain-text error with discovered services and next steps.
 func (m *LLMResolver) serveResolutionFailure(w http.ResponseWriter, r *http.Request, hostname string, resolveErr error) error {
 	msg := resolveErr.Error()
+	if errors.Is(resolveErr, ErrNoConfidentMatch) {
+		msg = fmt.Sprintf(
+			"No discovered service plausibly serves %s, so it was left unmapped rather than routed somewhere unrelated. Pick the right one below, or start the service and reload.",
+			hostname,
+		)
+		// The model's own account of why nothing matched is the most
+		// actionable thing on this page, so keep it rather than dropping it.
+		if reason := declineReason(resolveErr); reason != "" {
+			msg = fmt.Sprintf("%s Its reasoning: %s", msg, reason)
+		}
+	}
 	if errors.Is(resolveErr, errNoLLM) {
 		reason := "no LLM is configured"
 		if m.resolver.HasAPIKey() && !m.llmEnabled {
@@ -246,6 +292,20 @@ func (m *LLMResolver) serveResolutionFailure(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusBadGateway)
 	w.Write([]byte(m.pickerSuggestionText(hostname, msg)))
 	return nil
+}
+
+// relatedDeclineMessage explains a declined related-service lookup to a
+// programmatic caller, which has no picker to fall through to. Same wording
+// whether the decline was just made or remembered from a recent one.
+func relatedDeclineMessage(originHostname, serviceName string, declineErr error) string {
+	msg := fmt.Sprintf(
+		"No discovered service plausibly serves %q from %s, so it was left unmapped rather than routed somewhere unrelated. Start the service, or map it at http://proxy.localhost.",
+		serviceName, originHostname,
+	)
+	if reason := declineReason(declineErr); reason != "" {
+		msg = fmt.Sprintf("%s Its reasoning: %s", msg, reason)
+	}
+	return msg
 }
 
 // handleSecondLevelProxy handles /_proxy/serviceName/path requests
@@ -279,6 +339,18 @@ func (m *LLMResolver) handleSecondLevelProxy(w http.ResponseWriter, r *http.Requ
 
 	if !force {
 		mapping = m.cache.Get(cacheKey)
+		// Same rule as the first-level path: an explicit prompt is a new
+		// question, so it is never answered from a remembered decline.
+		if mapping == nil && userPrompt == "" {
+			if recent := m.declines.Get(cacheKey); recent != nil {
+				m.logger.Debug("recent decline for related service; not asking again",
+					zap.String("origin", originHostname),
+					zap.String("service", serviceName),
+				)
+				http.Error(w, relatedDeclineMessage(originHostname, serviceName, recent), http.StatusBadGateway)
+				return nil
+			}
+		}
 	}
 
 	if mapping == nil {
@@ -300,10 +372,14 @@ func (m *LLMResolver) handleSecondLevelProxy(w http.ResponseWriter, r *http.Requ
 
 			resolved, err := m.resolveRelatedChain(r.Context(), originHostname, originMapping, serviceName, userPrompt, force)
 			if err != nil {
+				if errors.Is(err, ErrNoConfidentMatch) && userPrompt == "" {
+					m.declines.Set(cacheKey, err)
+				}
 				return nil, err
 			}
 
 			// Cache the result
+			m.declines.Delete(cacheKey)
 			m.cache.Set(cacheKey, resolved)
 			if err := m.cache.Save(); err != nil {
 				m.logger.Warn("failed to save cache", zap.Error(err))
@@ -313,6 +389,19 @@ func (m *LLMResolver) handleSecondLevelProxy(w http.ResponseWriter, r *http.Requ
 		})
 
 		if err != nil {
+			// As on the first-level path, a decline is the model doing what it
+			// was asked. There's no picker to fall through to here (these are
+			// programmatic calls), so the answer is a clear message rather
+			// than a raw error string.
+			if errors.Is(err, ErrNoConfidentMatch) {
+				m.logger.Info("no confident match for related service",
+					zap.String("origin", originHostname),
+					zap.String("service", serviceName),
+					zap.Error(err),
+				)
+				http.Error(w, relatedDeclineMessage(originHostname, serviceName, err), http.StatusBadGateway)
+				return nil
+			}
 			m.logger.Error("failed to resolve related service",
 				zap.String("origin", originHostname),
 				zap.String("service", serviceName),
@@ -394,7 +483,31 @@ func (m *LLMResolver) resolveRelatedChain(
 		return nil, errNoLLM
 	}
 
-	return m.resolver.ResolveRelatedService(ctx, originHostname, originMapping, serviceName, userPrompt, processes, containers, m.cache.GetAll())
+	mapping, err := m.resolver.ResolveRelatedService(ctx, originHostname, originMapping, serviceName, userPrompt, processes, containers, m.cache.GetAll())
+	if err == nil {
+		return mapping, nil
+	}
+
+	// The model declined. If force made us skip the heuristic above, run it
+	// now: same reasoning as this function's doc comment, a heuristic answer
+	// beats a guaranteed error on a call with no picker to fall through to.
+	//
+	// Not when the caller gave an explicit prompt. That prompt says the
+	// heuristic's answer is not what they want, and a heuristic fallback would
+	// ignore it silently and then be cached under this key, so later calls
+	// would get it too. A clear decline tells them the prompt did not help.
+	if errors.Is(err, ErrNoConfidentMatch) && skipHeuristic && userPrompt == "" {
+		if fallback := ResolveRelatedHeuristically(originMapping, serviceName, processes, containers); fallback != nil {
+			m.logger.Info("LLM declined; falling back to the heuristic",
+				zap.String("origin", originHostname),
+				zap.String("service", serviceName),
+				zap.String("reason", fallback.LLMReason),
+			)
+			return fallback, nil
+		}
+	}
+
+	return nil, err
 }
 
 // handleMappingsAPI handles CRUD operations for mappings
