@@ -17,6 +17,7 @@ func newTestResolver(t *testing.T) *LLMResolver {
 	m := &LLMResolver{
 		logger:       logger,
 		cache:        NewCache(filepath.Join(t.TempDir(), "mappings.json"), logger),
+		declines:     NewDeclineCache(),
 		resolver:     NewResolver("", "", "test-model", "", logger),
 		pickerSecret: []byte("test-secret-test-secret-test-sec"),
 	}
