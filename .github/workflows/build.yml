@@ -11,6 +11,7 @@ jobs:
   build:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
     strategy:
       matrix:
         include:
@@ -86,6 +87,7 @@ jobs:
   docker:
     name: Build Docker image
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -106,6 +108,7 @@ jobs:
     name: Release
     needs: [build, docker]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
